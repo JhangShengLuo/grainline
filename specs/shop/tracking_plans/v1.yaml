@@ -1,0 +1,74 @@
+# L1 事件契約（Tracking Plan）— 擁有者：前端、PM
+#
+# 每個事件都會自動帶信封欄位，不需要在這裡宣告：
+#   event_id, event_name, timestamp（台北時間）, anonymous_id（裝置）, user_id（登入後才有）, tracking_plan_version
+# fires_on：在哪個行為時刻送出（時刻清單見 api/app/spec.py 的 Moment）
+# property 型別：string / integer / number / boolean；string 可以加 enum
+# from：值取自哪個情境欄位（商品、購物車、訂單…）；SDK 和模擬器都照這個填值
+
+version: 1
+name: 現行版本
+status: current
+description: 加入購物車等 API 成功才送；訂單以後端建立為準。
+
+common_properties:
+  platform:
+    type: string
+    enum: [web, app]
+    description: 事件來源平台
+    from: session.platform
+
+events:
+  page_view:
+    description: 使用者看到一個頁面
+    trigger: 頁面載入完成（SPA 切換路由也算）
+    fires_on: [page_load]
+    properties:
+      page_type:
+        type: string
+        enum: [home, category, product, cart, checkout]
+        from: page.type
+
+  product_view:
+    description: 使用者看到商品詳情
+    trigger: 商品詳情頁載入完成
+    fires_on: [product_detail_load]
+    properties:
+      product_id: {type: string, from: product.id}
+      price: {type: number, min: 0, description: 當下售價（新台幣）, from: product.price}
+
+  add_to_cart:
+    description: 商品加入購物車
+    trigger: 點擊「加入購物車」且 API 回傳成功
+    fires_on: [add_to_cart_success]
+    properties:
+      product_id: {type: string, from: product.id}
+      price: {type: number, min: 0, from: product.price}
+      quantity: {type: integer, min: 1, max: 99, from: item.quantity}
+
+  checkout_start:
+    description: 進入結帳流程
+    trigger: 結帳頁載入完成
+    fires_on: [checkout_load]
+    properties:
+      cart_value: {type: number, min: 0, from: cart.total}
+      item_count: {type: integer, min: 1, from: cart.count}
+
+  order_completed:
+    description: 訂單成立
+    trigger: 後端建立訂單成功（付款 API 回傳成功）
+    fires_on: [payment_success]
+    properties:
+      order_id: {type: string, from: order.id}
+      revenue: {type: number, min: 0, description: 訂單金額（新台幣，未扣折扣）, from: cart.total}
+      item_count: {type: integer, min: 1, from: cart.count}
+
+  login:
+    description: 登入成功
+    trigger: 登入 API 回傳成功，之後的事件都會帶 user_id
+    fires_on: [login_success]
+    properties:
+      method:
+        type: string
+        enum: [email, google, line]
+        from: login.method

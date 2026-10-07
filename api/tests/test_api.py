@@ -57,6 +57,7 @@ def test_report_rows_and_broken_report(client: TestClient) -> None:
     body = client.get("/reports/daily_overview").json()
     assert len(body["rows"]) == 28
     assert body["rows"][0]["period"] == "2026-09-01"
+    assert body["metrics"][0] == {"name": "uv", "label": "不重複訪客", "additivity": "non_additive", "format": "number"}
     broken = client.get("/reports/promotion_weekly")
     assert broken.status_code == 409
     assert "coupon_code" in broken.json()["detail"]["reason"]
@@ -65,11 +66,12 @@ def test_report_rows_and_broken_report(client: TestClient) -> None:
 def test_editing_specs_rebuilds_on_next_request(client: TestClient, spec_dir: Path) -> None:
     assert client.get("/checks").json()["summary"]["error"] == 3
     # 前端補上 coupon_code 埋點 → R3 衝突消失，報表可以建立
-    l1 = spec_dir / "l1_tracking_plan.yaml"
+    l1 = spec_dir / "tracking_plans" / "v1.yaml"
     l1.write_text(
         l1.read_text(encoding="utf-8").replace(
-            "      item_count: {type: integer, min: 1}\n\n  login:",
-            "      item_count: {type: integer, min: 1}\n      coupon_code: {type: string}\n\n  login:",
+            "      item_count: {type: integer, min: 1, from: cart.count}\n\n  login:",
+            "      item_count: {type: integer, min: 1, from: cart.count}\n"
+            "      coupon_code: {type: string, from: order.coupon_code}\n\n  login:",
         ),
         encoding="utf-8",
     )

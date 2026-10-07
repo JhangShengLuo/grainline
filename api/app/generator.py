@@ -1,8 +1,8 @@
-"""依 L1 事件契約與 simulation 設定產生合成事件。只產生假資料。
+"""依模擬設定產生使用者行為，再依 L1 的 fires_on 把行為轉成事件。只產生假資料。
 
-每個 visitor 依 persona 抽樣 session 數，每個 session 沿著 funnel 前進，
-每一步依 persona 的 continue 機率決定是否繼續。property 的值來源依序是：
-funnel step 寫死的值 → bindings 指定的情境值（商品、購物車…）→ 依 L1 型別隨機產生。
+行為和埋點是分開的：模擬器只決定「使用者做了什麼」（行為時刻 moment 與當下情境），
+L1 決定「哪些時刻要送哪些事件、property 的值從哪裡來」。所以同一個 seed 產生的是同一群人、
+同樣的行為；換一份 tracking plan，只有記錄下來的事件不同。
 """
 
 from __future__ import annotations
@@ -22,18 +22,25 @@ Product = tuple[str, float]
 
 
 @dataclass
-class _SessionContext:
+class Context:
+    """一個 session 當下的情境，L1 property 的 from 就是取這裡的值。"""
+
     platform: str
+    page_type: str | None = None
     product: Product | None = None
     viewed: list[Product] = field(default_factory=list)
     quantity: int | None = None
     cart: list[tuple[Product, int]] = field(default_factory=list)
     order_id: str | None = None
+    coupon_code: str | None = None
+    login_method: str | None = None
 
-    def value(self, binding: str) -> Any:
-        match binding:
+    def value(self, path: str) -> Any:
+        match path:
             case "session.platform":
                 return self.platform
+            case "page.type":
+                return self.page_type
             case "product.id":
                 return self.product[0] if self.product else None
             case "product.price":
@@ -46,7 +53,11 @@ class _SessionContext:
                 return sum(qty for _, qty in self.cart)
             case "order.id":
                 return self.order_id
-        raise ValueError(f"未知的 binding: {binding}")
+            case "order.coupon_code":
+                return self.coupon_code
+            case "login.method":
+                return self.login_method
+        raise ValueError(f"未知的情境欄位: {path}")
 
 
 def _poisson(rng: random.Random, lam: float) -> int:
@@ -75,6 +86,7 @@ class _Generator:
     def __init__(self, project: Project) -> None:
         self.plan = project.tracking_plan
         self.sim = project.simulation
+        self.behavior = self.sim.behavior
         self.rng = random.Random(self.sim.seed)
         catalog = self.sim.catalog
         self.catalog: list[Product] = [
@@ -82,6 +94,8 @@ class _Generator:
             for i in range(1, catalog.size + 1)
         ]
         self.start = datetime.combine(self.sim.start_date, datetime.min.time())
+        # 埋點用的亂數和行為用的亂數分開：換 tracking plan 不會改變使用者的行為
+        self.fake_rng = random.Random(self.sim.seed + 1)
 
     def run(self) -> list[dict[str, Any]]:
         names = list(self.sim.personas)
@@ -90,6 +104,9 @@ class _Generator:
         for i in range(self.sim.visitors):
             persona = self.sim.personas[self.rng.choices(names, weights)[0]]
             events += self._visitor(i, persona)
+        # 觀察期在最後一天午夜結束（像資料快照）：跨過午夜的 session 只留下之前的部分
+        end = (self.start + timedelta(days=self.sim.days)).isoformat(sep=" ")
+        events = [e for e in events if e["timestamp"] < end]
         events.sort(key=lambda e: (e["timestamp"], e["event_id"]))
         return events
 
@@ -101,9 +118,14 @@ class _Generator:
         n_sessions = _poisson(rng, persona.sessions_per_week * self.sim.days / 7)
         starts = sorted(self._session_start() for _ in range(n_sessions))
         events: list[dict[str, Any]] = []
+        last_end: datetime | None = None
         for start in starts:
+            # 同一個人一次只會有一個 session；前一個還沒結束就往後延
+            if last_end is not None and start <= last_end:
+                start = last_end + timedelta(minutes=rng.randint(1, 30))
             platform = rng.choice(persona.platforms)
-            events += self._session(persona, start, platform, anonymous_ids[platform], user_id, logged_in)
+            session, last_end = self._session(persona, start, platform, anonymous_ids[platform], user_id, logged_in)
+            events += session
         return events
 
     def _session_start(self) -> datetime:
@@ -123,68 +145,80 @@ class _Generator:
         anonymous_id: str,
         user_id: str | None,
         logged_in: set[str],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], datetime]:
+        """回傳 (事件, session 結束時間)。"""
         rng, sim = self.rng, self.sim
-        ctx = _SessionContext(platform)
+        ctx = Context(platform)
         current_user = user_id if platform in logged_in else None
         clock = start
         out: list[dict[str, Any]] = []
 
-        def emit(event_name: str, fixed: dict[str, Any]) -> None:
+        def moment(name: str) -> None:
+            """行為時刻：送出 L1 裡 fires_on 這個時刻的所有事件，然後時間往前走。"""
             nonlocal clock
-            out.append(
-                {
-                    "event_id": f"{rng.getrandbits(64):016x}",
+            for event_name in self.plan.events_on(name):
+                out.append({
+                    "event_id": f"{self.fake_rng.getrandbits(64):016x}",
                     "event_name": event_name,
                     "timestamp": clock.isoformat(sep=" "),
                     "anonymous_id": anonymous_id,
                     "user_id": current_user,
                     "tracking_plan_version": self.plan.version,
-                    "properties": self._properties(event_name, fixed, ctx),
-                }
-            )
+                    "properties": self._properties(event_name, ctx),
+                })
             clock += timedelta(seconds=rng.randint(5, 120))
 
         for index, step in enumerate(sim.funnel):
-            if index > 0 and rng.random() >= persona.continue_.get(step.event, 1.0):
+            if index > 0 and rng.random() >= persona.continue_.get(step.action, 1.0):
                 break
+            if step.action in ("checkout", "purchase") and not ctx.cart:
+                break  # 加入購物車全部失敗：沒有東西可以結帳
             for _ in range(rng.randint(*step.repeat)):
-                self._apply_action(step.action, ctx)
-                emit(step.event, step.properties)
-            if (
-                index == 0
-                and sim.login
-                and user_id
-                and current_user is None
-                and rng.random() < sim.login.rate_per_session
-            ):
+                self._act(step.action, ctx, moment)
+            if index == 0 and sim.login and user_id and current_user is None and rng.random() < sim.login.rate_per_session:
                 current_user = user_id
                 logged_in.add(platform)
-                emit(sim.login.event, {})
-        return out
+                ctx.login_method = rng.choice(sim.login.methods)
+                moment("login_success")
+        return out, clock
 
-    def _apply_action(self, action: str | None, ctx: _SessionContext) -> None:
-        rng = self.rng
-        if action == "view_product":
-            ctx.product = rng.choice(self.catalog)
+    def _act(self, action: str, ctx: Context, moment: Any) -> None:
+        rng, behavior = self.rng, self.behavior
+        if action == "view_home":
+            ctx.page_type, ctx.product = "home", None
+            moment("page_load")
+        elif action == "view_product":
+            ctx.page_type, ctx.product, ctx.quantity = "product", rng.choice(self.catalog), None
             ctx.viewed.append(ctx.product)
-            ctx.quantity = None
+            moment("page_load")
+            moment("product_detail_load")
         elif action == "add_to_cart":
             ctx.product = rng.choice(ctx.viewed or self.catalog)
             ctx.quantity = rng.randint(1, 3)
-            ctx.cart.append((ctx.product, ctx.quantity))
+            moment("add_to_cart_click")
+            if rng.random() < behavior.add_to_cart_api_success:
+                ctx.cart.append((ctx.product, ctx.quantity))
+                moment("add_to_cart_success")
+        elif action == "checkout":
+            ctx.page_type, ctx.product = "checkout", None
+            moment("page_load")
+            moment("checkout_load")
         elif action == "purchase":
             ctx.order_id = f"o{rng.getrandbits(40):010x}"
+            ctx.coupon_code = rng.choice(behavior.coupon_codes) if rng.random() < behavior.coupon_rate else None
+            moment("payment_success")
+            if rng.random() < behavior.complete_page_reached:
+                moment("order_complete_page_load")
+                if rng.random() < behavior.complete_page_reload_rate:
+                    moment("order_complete_page_load")
 
-    def _properties(self, event_name: str, fixed: dict[str, Any], ctx: _SessionContext) -> dict[str, Any]:
+    def _properties(self, event_name: str, ctx: Context) -> dict[str, Any]:
+        """有 from 的 property 取情境值（情境裡沒有就不帶）；沒有 from 的依型別隨機產生。"""
         props: dict[str, Any] = {}
         for name, prop in self.plan.properties_of(event_name).items():
-            value = fixed.get(name)
-            if value is None and name in self.sim.bindings:
-                value = ctx.value(self.sim.bindings[name])
-            if value is None:
-                value = _fake(name, prop, self.rng)
-            props[name] = value
+            value = ctx.value(prop.from_) if prop.from_ else _fake(name, prop, self.fake_rng)
+            if value is not None:
+                props[name] = value
         return props
 
 

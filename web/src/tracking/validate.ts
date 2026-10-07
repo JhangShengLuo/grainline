@@ -30,7 +30,7 @@ export function validateEvent(plan: TrackingPlan, eventName: string, properties:
   for (const [name, spec] of Object.entries(declared)) {
     const value = properties[name];
     if (value === undefined || value === null) {
-      warnings.push(`缺少 property ${name}（${spec.type}）：下游會是 NULL`);
+      if (spec.required !== false) warnings.push(`缺少 property ${name}（${spec.type}）：下游會是 NULL`);
     } else if (!typeOk(spec, value)) {
       warnings.push(`${name} 應為 ${spec.type}，收到 ${JSON.stringify(value)}`);
     } else if (spec.enum && !spec.enum.includes(value as string)) {

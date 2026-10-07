@@ -1,0 +1,70 @@
+# L1 事件契約 v2 — 前端團隊的提案（和 v1 比較用）
+#
+# 提案理由：前端比較好埋、少一個事件、補上行銷要的折扣碼。
+# 每一項改動都有代價，切到 console 的「版本差異」看數字。
+
+version: 2
+name: 前端提案
+status: proposal
+description: 加入購物車改成點擊就送；訂單改在付款成功頁送；商品瀏覽併進 page_view；補上折扣碼。
+
+common_properties:
+  platform:
+    type: string
+    enum: [web, app]
+    description: 事件來源平台
+    from: session.platform
+
+events:
+  # 改動 1：product_view 併進 page_view，商品頁的 page_view 帶 product_id、price
+  page_view:
+    description: 使用者看到一個頁面
+    trigger: 頁面載入完成（SPA 切換路由也算）；商品頁會帶商品資訊
+    fires_on: [page_load]
+    properties:
+      page_type:
+        type: string
+        enum: [home, category, product, cart, checkout]
+        from: page.type
+      product_id: {type: string, description: 只有商品頁有, from: product.id, required: false}
+      price: {type: number, min: 0, description: 只有商品頁有, from: product.price, required: false}
+
+  # 改動 2：點擊就送，不等 API 回應（API 失敗的點擊也會被記錄）
+  add_to_cart:
+    description: 商品加入購物車
+    trigger: 點擊「加入購物車」
+    fires_on: [add_to_cart_click]
+    properties:
+      product_id: {type: string, from: product.id}
+      price: {type: number, min: 0, from: product.price}
+      quantity: {type: integer, min: 1, max: 99, from: item.quantity}
+
+  checkout_start:
+    description: 進入結帳流程
+    trigger: 結帳頁載入完成
+    fires_on: [checkout_load]
+    properties:
+      cart_value: {type: number, min: 0, from: cart.total}
+      item_count: {type: integer, min: 1, from: cart.count}
+
+  # 改動 3：改在付款成功頁送（沒等到頁面的人會漏掉，重新整理會重複送）
+  # 改動 4：補上折扣碼
+  order_completed:
+    description: 訂單成立
+    trigger: 付款成功頁載入
+    fires_on: [order_complete_page_load]
+    properties:
+      order_id: {type: string, from: order.id}
+      revenue: {type: number, min: 0, description: 訂單金額（新台幣，未扣折扣）, from: cart.total}
+      item_count: {type: integer, min: 1, from: cart.count}
+      coupon_code: {type: string, description: 沒用折扣碼時不帶, from: order.coupon_code, required: false}
+
+  login:
+    description: 登入成功
+    trigger: 登入 API 回傳成功，之後的事件都會帶 user_id
+    fires_on: [login_success]
+    properties:
+      method:
+        type: string
+        enum: [email, google, line]
+        from: login.method

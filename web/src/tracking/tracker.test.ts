@@ -6,17 +6,24 @@ import { validateEvent } from "./validate";
 
 const plan: TrackingPlan = {
   version: 1,
-  common_properties: { platform: { type: "string", enum: ["web", "app"] } },
+  common_properties: { platform: { type: "string", enum: ["web", "app"], from: "session.platform" } },
   events: {
-    page_view: { properties: { page_type: { type: "string", enum: ["home", "product"] } } },
-    add_to_cart: {
+    page_view: {
+      fires_on: ["page_load"],
       properties: {
-        product_id: { type: "string" },
-        price: { type: "number", min: 0 },
-        quantity: { type: "integer", min: 1 },
+        page_type: { type: "string", enum: ["home", "product"], from: "page.type" },
+        product_id: { type: "string", from: "product.id", required: false },
       },
     },
-    login: { properties: { method: { type: "string" } } },
+    add_to_cart: {
+      fires_on: ["add_to_cart_success"],
+      properties: {
+        product_id: { type: "string", from: "product.id" },
+        price: { type: "number", min: 0, from: "product.price" },
+        quantity: { type: "integer", min: 1, from: "item.quantity" },
+      },
+    },
+    login: { fires_on: ["login_success"], properties: { method: { type: "string", from: "login.method" } } },
   },
 };
 
@@ -64,6 +71,35 @@ describe("validateEvent", () => {
     ["page_view", { platform: "web", page_type: "home", ref: "ad" }, "ref 沒有在 L1 宣告"],
   ])("warns about %s %j", (name, props, expected) => {
     expect(validateEvent(plan, name, props).join("\n")).toContain(expected);
+  });
+});
+
+describe("Tracker.moment", () => {
+  it("sends the events the plan fires on that moment, filling properties from context", async () => {
+    const { tracker, sent } = setup();
+    tracker.moment("add_to_cart_success", { product: { id: "p1", price: 399 }, item: { quantity: 2 } });
+    await tracker.flush();
+    expect(sent[0].map((e) => [e.event_name, e.properties])).toEqual([
+      ["add_to_cart", { platform: "web", product_id: "p1", price: 399, quantity: 2 }],
+    ]);
+  });
+
+  it("sends nothing for a moment the plan does not track", () => {
+    const { tracker } = setup();
+    expect(tracker.moment("add_to_cart_click", { product: { id: "p1", price: 399 } })).toEqual([]);
+  });
+
+  it("leaves out optional properties missing from context without warning", () => {
+    const { tracker } = setup();
+    const [tracked] = tracker.moment("page_load", { page: { type: "home" } });
+    expect(tracked.event.properties).toEqual({ platform: "web", page_type: "home" });
+    expect(tracked.clientWarnings).toEqual([]);
+  });
+
+  it("warns when a required property is missing from context", () => {
+    const { tracker } = setup();
+    const [tracked] = tracker.moment("add_to_cart_success", { product: { id: "p1", price: 399 } });
+    expect(tracked.clientWarnings.join()).toContain("缺少 property quantity");
   });
 });
 

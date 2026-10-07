@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { formatPrice, type Product } from "../api";
-import { usePageView, useTrackOnce, useTracking } from "../tracking/TrackingProvider";
+import { useMomentOnce, usePageLoad, useTracking } from "../tracking/TrackingProvider";
 import { useCart } from "./CartContext";
 import { useCatalog } from "./ShopLayout";
 
@@ -38,7 +38,7 @@ function Categories({ catalog, current }: { catalog: Product[]; current?: string
 }
 
 export function HomePage() {
-  usePageView("home");
+  usePageLoad("home");
   const catalog = useCatalog();
   if (!catalog) return <p className="muted">載入商品…</p>;
   return (
@@ -51,7 +51,7 @@ export function HomePage() {
 }
 
 export function CategoryPage() {
-  usePageView("category");
+  usePageLoad("category");
   const { category = "" } = useParams();
   const catalog = useCatalog();
   if (!catalog) return <p className="muted">載入商品…</p>;
@@ -65,7 +65,6 @@ export function CategoryPage() {
 }
 
 export function ProductPage() {
-  usePageView("product");
   const { productId } = useParams();
   const location = useLocation();
   const catalog = useCatalog();
@@ -73,21 +72,31 @@ export function ProductPage() {
   const { tracker } = useTracking();
   const cart = useCart();
   const [quantity, setQuantity] = useState(1);
-  const [status, setStatus] = useState<"idle" | "adding" | "added">("idle");
+  const [status, setStatus] = useState<"idle" | "adding" | "added" | "failed">("idle");
 
-  // L1：商品詳情頁載入完成
-  useTrackOnce("product_view", product ? { product_id: product.id, price: product.price } : null, location.key);
+  // 商品資料到了才算頁面載入完成；要送 page_view 還是 product_view、帶哪些欄位，由 tracking plan 決定
+  const productContext = product ? { product: { id: product.id, price: product.price } } : null;
+  usePageLoad("product", productContext);
+  useMomentOnce("product_detail_load", productContext, location.key);
 
   if (!catalog) return <p className="muted">載入商品…</p>;
   if (!product) return <p>找不到商品 {productId}。<Link to="/shop">回首頁</Link></p>;
 
   async function addToCart() {
     if (!product) return;
+    const context = { product: { id: product.id, price: product.price }, item: { quantity } };
+    tracker.moment("add_to_cart_click", context);
     setStatus("adding");
-    await sleep(300); // 假裝呼叫購物車 API
+    await sleep(300); // 假裝呼叫購物車 API，和模擬器一樣有 10% 會失敗
+    if (Math.random() < 0.1) {
+      setStatus("failed");
+      return;
+    }
     cart.add({ productId: product.id, name: product.name, price: product.price, quantity });
-    // L1：點擊「加入購物車」且 API 回傳成功後才送
-    tracker.track("add_to_cart", { product_id: product.id, price: product.price, quantity });
+    tracker.moment("add_to_cart_success", {
+      ...context,
+      cart: { total: cart.total + product.price * quantity, count: cart.count + quantity },
+    });
     setStatus("added");
   }
 
@@ -117,13 +126,14 @@ export function ProductPage() {
           </button>
         </div>
         {status === "added" && <p className="success">已加入購物車。<Link to="/shop/cart">去結帳</Link></p>}
+        {status === "failed" && <p className="warning-text">庫存同步逾時，請再試一次。（模擬 API 失敗：看看兩個版本的 add_to_cart 各記錄了什麼）</p>}
       </div>
     </article>
   );
 }
 
 export function CartPage() {
-  usePageView("cart");
+  usePageLoad("cart");
   const cart = useCart();
   if (cart.lines.length === 0) return <><h1>購物車</h1><p className="muted">購物車是空的。<Link to="/shop">去逛逛</Link></p></>;
   return (
@@ -163,28 +173,42 @@ function CartTable() {
 
 interface OrderState {
   orderId: string;
+  couponCode: string | null;
   revenue: number;
   itemCount: number;
 }
 
+const orderContext = (order: OrderState) => ({
+  order: { id: order.orderId, coupon_code: order.couponCode },
+  cart: { total: order.revenue, count: order.itemCount },
+});
+
 export function CheckoutPage() {
-  usePageView("checkout");
+  usePageLoad("checkout");
   const location = useLocation();
   const navigate = useNavigate();
   const cart = useCart();
+  const { tracker } = useTracking();
   const [paying, setPaying] = useState(false);
+  const [coupon, setCoupon] = useState("");
   // 進入結帳頁當下的購物車內容
-  const [snapshot] = useState(() => ({ cart_value: cart.total, item_count: cart.count }));
+  const [snapshot] = useState(() => ({ cart: { total: cart.total, count: cart.count } }));
 
-  // L1：結帳頁載入完成
-  useTrackOnce("checkout_start", cart.count > 0 ? snapshot : null, location.key);
+  useMomentOnce("checkout_load", cart.count > 0 ? snapshot : null, location.key);
 
   if (cart.lines.length === 0 && !paying) return <Navigate to="/shop/cart" replace />;
 
   async function pay() {
     setPaying(true);
     await sleep(500); // 假裝付款
-    const order: OrderState = { orderId: `o-${crypto.randomUUID().slice(0, 8)}`, revenue: cart.total, itemCount: cart.count };
+    const order: OrderState = {
+      orderId: `o-${crypto.randomUUID().slice(0, 8)}`,
+      couponCode: coupon.trim().toUpperCase() || null,
+      revenue: cart.total,
+      itemCount: cart.count,
+    };
+    // 後端建立訂單成功；接著才導到成功頁（使用者可能沒等到，也可能重新整理）
+    tracker.moment("payment_success", orderContext(order));
     cart.clear();
     navigate("/shop/complete", { state: order, replace: true });
   }
@@ -193,6 +217,10 @@ export function CheckoutPage() {
     <>
       <h1>結帳</h1>
       <CartTable />
+      <label className="field">
+        折扣碼（選填）
+        <input value={coupon} onChange={(e) => setCoupon(e.target.value)} placeholder="FALL10" />
+      </label>
       <p className="muted">這是 demo，不會真的扣款。</p>
       <div className="actions">
         <button type="button" className="primary" onClick={pay} disabled={paying}>
@@ -203,29 +231,22 @@ export function CheckoutPage() {
   );
 }
 
-const SENT_ORDERS_KEY = "grainline.sent_orders";
-
-function alreadySent(orderId: string): boolean {
-  const sent: string[] = JSON.parse(sessionStorage.getItem(SENT_ORDERS_KEY) ?? "[]");
-  if (sent.includes(orderId)) return true;
-  sessionStorage.setItem(SENT_ORDERS_KEY, JSON.stringify([...sent, orderId]));
-  return false;
-}
-
 export function CompletePage() {
-  const order = useLocation().state as OrderState | null;
-  // L1：付款成功頁載入。重新整理這頁不能再送一次，否則同一張訂單會被算兩次（違反 fct_orders 的 grain）
-  const [shouldSend] = useState(() => (order ? !alreadySent(order.orderId) : false));
-  const properties = order && shouldSend
-    ? { order_id: order.orderId, revenue: order.revenue, item_count: order.itemCount }
-    : null;
-  useTrackOnce("order_completed", properties, order?.orderId);
+  const location = useLocation();
+  const order = location.state as OrderState | null;
+  // 每次載入都是一次 order_complete_page_load，重新整理也算——這是真實世界的行為。
+  // v1 在 payment_success 記訂單，不受影響；v2 在這個時刻記訂單，重新整理就會重複。
+  useMomentOnce("order_complete_page_load", order && orderContext(order), location.key);
 
   if (!order) return <Navigate to="/shop" replace />;
   return (
     <>
       <h1>訂單成立</h1>
-      <p>訂單編號 <code>{order.orderId}</code>，金額 {formatPrice(order.revenue)}，共 {order.itemCount} 件。</p>
+      <p>
+        訂單編號 <code>{order.orderId}</code>，金額 {formatPrice(order.revenue)}，共 {order.itemCount} 件
+        {order.couponCode && <>，折扣碼 <code>{order.couponCode}</code></>}。
+      </p>
+      <p className="muted small">試試重新整理這一頁，再看右側的埋點紀錄：v1 和 v2 的結果不一樣。</p>
       <p><Link to="/shop">繼續逛逛</Link></p>
     </>
   );
@@ -241,9 +262,9 @@ export function LoginPage() {
   function submit(event: FormEvent) {
     event.preventDefault();
     const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-") || "guest";
-    // L1：登入 API 回傳成功，之後的事件都會帶 user_id（所以先 identify 再送 login）
+    // 登入 API 回傳成功：先 identify，之後的事件（包括 login 本身）都帶 user_id
     login(`demo-${slug}`);
-    tracker.track("login", { method });
+    tracker.moment("login_success", { login: { method } });
     navigate(-1);
   }
 

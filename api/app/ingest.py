@@ -72,7 +72,8 @@ def plan_warnings(plan: TrackingPlan, event: IncomingEvent) -> list[str]:
         messages.append(f"property {name} 沒有在 L1 宣告：下游拿不到")
     for name, prop in declared.items():
         if name not in event.properties or event.properties[name] is None:
-            messages.append(f"缺少 property {name}（{prop.type}）：下游會是 NULL")
+            if prop.required:
+                messages.append(f"缺少 property {name}（{prop.type}）：下游會是 NULL")
             continue
         value = event.properties[name]
         if not _type_ok(prop, value):

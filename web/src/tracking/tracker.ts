@@ -1,5 +1,5 @@
-import type { IngestResponse, Properties, RawEvent, TrackedEvent, TrackingPlan } from "./types";
-import { validateEvent } from "./validate";
+import type { IngestResponse, Moment, MomentContext, Properties, RawEvent, TrackedEvent, TrackingPlan } from "./types";
+import { declaredProperties, validateEvent } from "./validate";
 
 export interface Transport {
   send(events: RawEvent[]): Promise<IngestResponse>;
@@ -29,9 +29,20 @@ type Listener = (event: TrackedEvent) => void;
 
 const randomId = () => crypto.randomUUID();
 
+function lookup(context: Record<string, unknown>, path: string): unknown {
+  return path.split(".").reduce<unknown>(
+    (value, key) => (value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined),
+    context,
+  );
+}
+
 /**
- * 埋點 SDK。不綁定任何事件：事件名稱與 property 都由呼叫端決定，
- * 送出前和 L1 比對並記下 warning，但不會擋下事件（schema-on-read，由 L2 決定怎麼處理）。
+ * 埋點 SDK。
+ *
+ * moment()：app 只回報「發生了什麼」（行為時刻與情境），要送哪些事件、property 取什麼值都由 L1 決定，
+ * 所以換一份 tracking plan，app 的程式碼不用改。
+ * track()：直接送一個事件（例如 L1 還沒宣告的新事件）。
+ * 送出前都會和 L1 比對並記下 warning，但不會擋下事件（schema-on-read，由 L2 決定怎麼處理）。
  */
 export class Tracker {
   readonly platform: string;
@@ -86,6 +97,21 @@ export class Tracker {
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** 行為時刻：送出 L1 裡 fires_on 這個時刻的所有事件 */
+  moment(name: Moment, context: MomentContext = {}): TrackedEvent[] {
+    const ctx: Record<string, unknown> = { ...context, session: { platform: this.platform } };
+    return Object.entries(this.plan.events)
+      .filter(([, spec]) => spec.fires_on.includes(name))
+      .map(([eventName]) => {
+        const props: Properties = {};
+        for (const [prop, spec] of Object.entries(declaredProperties(this.plan, eventName))) {
+          const value = spec.from ? lookup(ctx, spec.from) : undefined;
+          if (value !== undefined && value !== null) props[prop] = value as Properties[string];
+        }
+        return this.track(eventName, props);
+      });
   }
 
   track(eventName: string, properties: Properties = {}): TrackedEvent {

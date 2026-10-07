@@ -52,6 +52,18 @@ def test_mismatches_are_reported(project: Project, name: str, properties: dict[s
     assert any(expected in m for m in plan_warnings(project.tracking_plan, event))
 
 
+def test_optional_property_may_be_absent() -> None:
+    from app.spec import load_project
+
+    from .conftest import SHOP_SPECS
+
+    v2 = load_project(SHOP_SPECS, 2).tracking_plan
+    event = IncomingEvent.model_validate(
+        {**_event("order_completed", "e1", order_id="o1", revenue=100, item_count=1), "tracking_plan_version": 2}
+    )
+    assert plan_warnings(v2, event) == []
+
+
 def test_timestamp_is_converted_to_taipei_time() -> None:
     event = IncomingEvent.model_validate(_event("page_view", "e1", page_type="home"))
     assert event.to_raw()["timestamp"] == "2026-10-07 10:00:00"

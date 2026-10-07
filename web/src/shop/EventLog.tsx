@@ -11,16 +11,20 @@ const short = (id: string | null) => (id ? (id.length > 14 ? `${id.slice(0, 14)}
 function SentEvent({ tracked }: { tracked: TrackedEvent }) {
   const { plan } = useTracking();
   const { event } = tracked;
+  const versionNote = event.tracking_plan_version !== plan.version ? `（v${event.tracking_plan_version}）` : "";
   const spec = plan.events[event.event_name];
   const warnings = [...new Set([...tracked.clientWarnings, ...tracked.serverWarnings])];
   return (
     <li className={`log-item ${warnings.length ? "has-warning" : ""}`}>
       <div className="log-head">
         <code className="event-name">{event.event_name}</code>
+        {versionNote && <span className="muted small">{versionNote}</span>}
         <span className={`status ${tracked.status}`}>{STATUS_LABEL[tracked.status]}</span>
         <time>{time(event.timestamp)}</time>
       </div>
-      <p className="trigger">{spec ? `L1 觸發時機：${spec.trigger || spec.description}` : "L1 沒有這個事件"}</p>
+      <p className="trigger">
+        {versionNote ? "其他版本送出的事件" : spec ? `L1 觸發時機：${spec.trigger || spec.description}` : "L1 沒有這個事件"}
+      </p>
       <dl className="props">
         {Object.entries(event.properties).map(([k, v]) => (
           <div key={k}><dt>{k}</dt><dd>{JSON.stringify(v)}</dd></div>
@@ -37,12 +41,13 @@ function SentEvent({ tracked }: { tracked: TrackedEvent }) {
 function ParsedEvents() {
   const [rows, setRows] = useState<LiveEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { planVersion } = useTracking();
   const refresh = useCallback(() => {
-    api<LiveEvent[]>("/events/live?limit=30").then(
+    api<LiveEvent[]>(`/events/live?limit=30&plan=${planVersion}`).then(
       (r) => { setRows(r); setError(null); },
       (e: Error) => setError(e.message),
     );
-  }, []);
+  }, [planVersion]);
 
   useEffect(() => {
     refresh();
@@ -85,12 +90,13 @@ function ParsedEvents() {
 }
 
 export function EventLog() {
-  const { log, platform, tracker, userId } = useTracking();
+  const { log, platform, tracker, userId, planVersion } = useTracking();
   const [tab, setTab] = useState<"sent" | "parsed">("sent");
   return (
     <aside className="event-log" aria-label="埋點紀錄">
       <h2>埋點紀錄</h2>
       <p className="identity small">
+        <span>tracking plan <b>v{planVersion}</b></span>
         <span>platform <b>{platform}</b></span>
         <span title={tracker.anonymousId}>anonymous_id <b>{short(tracker.anonymousId)}</b></span>
         <span>user_id <b>{userId ?? "—（未登入）"}</b></span>

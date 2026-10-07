@@ -41,6 +41,13 @@ metrics:
     measure: {agg: count}
     additivity: additive
 
+  cart_adds:
+    label: 加入購物車次數
+    model: fct_cart_adds
+    time_column: ts
+    measure: {agg: count}
+    additivity: additive
+
   cart_adders:
     label: 加入購物車人數
     model: fct_cart_adds
@@ -111,7 +118,7 @@ reports:
   daily_overview:
     label: 每日總覽
     time_grain: day
-    metrics: [uv, sessions, page_views, orders, revenue, conversion_rate, aov]
+    metrics: [uv, sessions, page_views, cart_adds, orders, revenue, conversion_rate, aov]
 
   weekly_by_platform:
     label: 各平台每週表現

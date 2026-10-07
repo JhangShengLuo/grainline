@@ -1,6 +1,6 @@
 """三條相容性規則：靜態檢查規格，有倉儲連線時再附上假資料上的數字證據。
 
-R1 可加性 / grain：不可加的指標不能從細 grain 加總到粗 grain
+R1 可加性 / grain：不可加的指標不能從細 grain 加總到粗 grain；L3 宣告的 grain 在資料上要成立
 R2 比率母體：rate 的分子必須是分母的子集（同一個計數單位、分子篩選包含分母篩選）
 R3 血緣可達：L4 用到的每個欄位都要能追回 L1 宣告過的 property，且型別相符
 """
@@ -48,6 +48,12 @@ def effective_additivity(project: Project, name: str) -> str:
         inner = effective_additivity(project, metric.of)
         return "additive" if metric.agg == "sum" and inner == "additive" else "non_additive"
     return "non_additive"
+
+
+def metric_format(project: Project, name: str) -> str:
+    """前端顯示用：rate 顯示百分比，其他顯示數字。"""
+    metric = project.metric_layer.metrics[name]
+    return "percent" if isinstance(metric, RatioMetric) and metric.kind == "rate" else "number"
 
 
 def _nests(fine: str, coarse: str) -> bool:
@@ -306,7 +312,12 @@ order by period""")
 def _lineage_evidence(con: duckdb.DuckDBPyConnection, project: Project, problem: Problem) -> dict[str, Any]:
     evidence: dict[str, Any] = {"path": [hop.__dict__ for hop in problem.hops]}
     details = problem.details
-    if problem.kind == "missing_property":
+    if problem.kind == "missing_event":
+        (count,) = con.execute(
+            "select count(*) from raw_events where event_name = ?", [details["event"]]
+        ).fetchone()
+        evidence |= {"summary": f"raw_events 裡 {details['event']} 事件有 {count:,} 筆", "events": count}
+    elif problem.kind == "missing_property":
         event, prop = details["event"], details["property"]
         scope = "" if event == "*" else f"where event_name = {literal(event)}"
         total, with_key = con.execute(
@@ -345,6 +356,38 @@ def _attach_evidence(con: duckdb.DuckDBPyConnection, project: Project, lineage: 
         finding.evidence = {"summary": f"無法計算證據：{exc}"}
 
 
+def _grain_findings(con: duckdb.DuckDBPyConnection, project: Project, lineage: Lineage) -> list[Finding]:
+    """L3 宣告的 grain 在資料上是否成立：同一個 grain 值不該出現在兩列。"""
+    findings = []
+    metrics = project.metric_layer.metrics
+    for name, model in project.models.items():
+        if name in lineage.broken_models or any(g not in lineage.usable_columns(name) for g in model.grain):
+            continue
+        grain = ", ".join(model.grain)
+        rows = _rows(con, f"""
+select {grain}, count(*) as rows from {name}
+group by all having count(*) > 1
+order by rows desc, {grain}""")
+        if not rows:
+            continue
+        extra = sum(r["rows"] - 1 for r in rows)
+        (total,) = con.execute(f"select count(*) from {name}").fetchone()
+        users = [m for m, metric in metrics.items() if isinstance(metric, SimpleMetric) and metric.model == name]
+        findings.append(Finding(
+            "R1", "error", "grain_duplicate", f"model:{name}",
+            f"L3 {name} 宣告一列代表一個 {grain}，但資料裡有 {len(rows):,} 個 {grain} 出現超過一次。"
+            f"建立在它上面的加總與計數都會被灌水。",
+            [f"metric:{m}" for m in users],
+            {
+                "summary": f"{name} 共 {total:,} 列，其中 {extra:,} 列（{extra / total:.1%}）是重複的 {grain}",
+                "duplicate_keys": len(rows),
+                "extra_rows": extra,
+                "rows": rows[:20],
+            },
+        ))
+    return findings
+
+
 def check_project(
     project: Project, lineage: Lineage | None = None, con: duckdb.DuckDBPyConnection | None = None
 ) -> list[Finding]:
@@ -356,6 +399,7 @@ def check_project(
 
     for finding in findings:
         _attach_evidence(con, project, lineage, finding)
+    findings += _grain_findings(con, project, lineage)
 
     # 規格上沒問題的 rate，也實際量一次分子有沒有跑出分母
     flagged = {f.subject for f in findings if f.rule == "R2"}

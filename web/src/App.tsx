@@ -1,5 +1,9 @@
-import { Link, Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 
+import { ChecksPage } from "./console/ChecksPage";
+import { ConsoleLayout } from "./console/ConsoleLayout";
+import { DiffPage } from "./console/DiffPage";
+import { ReportsPage } from "./console/ReportsPage";
 import { CartProvider } from "./shop/CartContext";
 import { ShopLayout } from "./shop/ShopLayout";
 import {
@@ -12,17 +16,6 @@ import {
   ProductPage,
 } from "./shop/pages";
 import { TrackingProvider } from "./tracking/TrackingProvider";
-
-function ConsolePlaceholder() {
-  return (
-    <div className="notice">
-      <h1>Console</h1>
-      <p>報表、相容性檢查與 tracking plan 版本切換會在 M4 放在這裡。</p>
-      <p>目前可以直接看 API：<a href="/api/checks">/api/checks</a>、<a href="/api/reports/daily_overview">/api/reports/daily_overview</a></p>
-      <p><Link to="/shop">去 demo 商店</Link></p>
-    </div>
-  );
-}
 
 export function App() {
   return (
@@ -46,7 +39,12 @@ export function App() {
         <Route path="complete" element={<CompletePage />} />
         <Route path="login" element={<LoginPage />} />
       </Route>
-      <Route path="/console" element={<ConsolePlaceholder />} />
+      <Route path="/console" element={<ConsoleLayout />}>
+        <Route index element={<Navigate to="reports" replace />} />
+        <Route path="reports" element={<ReportsPage />} />
+        <Route path="checks" element={<ChecksPage />} />
+        <Route path="diff" element={<DiffPage />} />
+      </Route>
       <Route path="*" element={<Navigate to="/shop" replace />} />
     </Routes>
   );

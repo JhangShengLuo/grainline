@@ -43,9 +43,17 @@ def test_rejects_fact_column_with_agg(raw_specs: dict[str, Any]) -> None:
     _assert_rejected(raw_specs, "不能有 agg")
 
 
-def test_rejects_model_with_unknown_source_event(raw_specs: dict[str, Any]) -> None:
-    raw_specs["models"]["fct_orders"]["source"] = "purchase"
-    _assert_rejected(raw_specs, "不是 L1 宣告的事件")
+def test_rejects_event_without_fires_on(raw_specs: dict[str, Any]) -> None:
+    del raw_specs["tracking_plan"]["events"]["login"]["fires_on"]
+    _assert_rejected(raw_specs, "fires_on")
+
+
+def test_rejects_unknown_moment_and_context_field(raw_specs: dict[str, Any]) -> None:
+    raw_specs["tracking_plan"]["events"]["login"]["fires_on"] = ["button_hover"]
+    _assert_rejected(raw_specs, "button_hover")
+    raw_specs["tracking_plan"]["events"]["login"]["fires_on"] = ["login_success"]
+    raw_specs["tracking_plan"]["events"]["login"]["properties"]["method"]["from"] = "user.email"
+    _assert_rejected(raw_specs, "user.email")
 
 
 def test_rejects_metric_on_unknown_model(raw_specs: dict[str, Any]) -> None:
@@ -63,6 +71,16 @@ def test_rejects_report_with_unknown_metric(raw_specs: dict[str, Any]) -> None:
     _assert_rejected(raw_specs, "gmv")
 
 
-def test_rejects_binding_to_undeclared_property(raw_specs: dict[str, Any]) -> None:
-    raw_specs["simulation"]["bindings"]["discount"] = "cart.total"
-    _assert_rejected(raw_specs, "discount")
+def test_rejects_persona_continue_for_action_not_in_funnel(raw_specs: dict[str, Any]) -> None:
+    raw_specs["simulation"]["funnel"] = raw_specs["simulation"]["funnel"][:2]
+    _assert_rejected(raw_specs, "不在 funnel")
+
+
+def test_loads_each_tracking_plan_version() -> None:
+    from app.spec import load_project, read_tracking_plans
+
+    from .conftest import SHOP_SPECS
+
+    assert list(read_tracking_plans(SHOP_SPECS)) == [1, 2]
+    assert load_project(SHOP_SPECS).tracking_plan.status == "current"
+    assert "product_view" not in load_project(SHOP_SPECS, 2).tracking_plan.events

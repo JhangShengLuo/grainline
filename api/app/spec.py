@@ -54,6 +54,34 @@ class Spec(BaseModel):
 
 PropertyType = Literal["string", "integer", "number", "boolean"]
 
+# 行為時刻：demo 商店與模擬器在這些時刻發出訊號，L1 用 fires_on 決定哪些事件在這個時刻送出。
+# 行為和埋點分開，同一群使用者、同樣的行為，換一份 tracking plan 就會得到不同的事件。
+Moment = Literal[
+    "page_load",                 # 頁面載入完成（context: page.type）
+    "product_detail_load",       # 商品詳情載入完成（product）
+    "add_to_cart_click",         # 點擊「加入購物車」（product, item）
+    "add_to_cart_success",       # 購物車 API 回傳成功（product, item, cart）
+    "checkout_load",             # 結帳頁載入完成（cart）
+    "payment_success",           # 付款成功、後端建立訂單（order, cart）
+    "order_complete_page_load",  # 付款成功頁載入；使用者可能沒等到，也可能重新整理（order, cart）
+    "login_success",             # 登入成功（login）
+]
+MOMENTS: tuple[str, ...] = Moment.__args__  # type: ignore[attr-defined]
+
+# property 的值可以取自這些情境欄位；沒有寫 from 的 property，模擬器依型別隨機產生
+ContextField = Literal[
+    "session.platform",
+    "page.type",
+    "product.id",
+    "product.price",
+    "item.quantity",
+    "cart.total",
+    "cart.count",
+    "order.id",
+    "order.coupon_code",
+    "login.method",
+]
+
 
 class Property(Spec):
     type: PropertyType
@@ -61,6 +89,8 @@ class Property(Spec):
     enum: list[str] | None = None
     min: float | None = None
     max: float | None = None
+    from_: ContextField | None = Field(None, alias="from")
+    required: bool = True  # false：情境裡沒有值時可以不帶（例如沒用折扣碼）
 
     @model_validator(mode="after")
     def _enum_only_for_string(self) -> Property:
@@ -72,11 +102,15 @@ class Property(Spec):
 class Event(Spec):
     description: str = ""
     trigger: str = ""
+    fires_on: list[Moment] = Field(min_length=1)
     properties: dict[Ident, Property] = {}
 
 
 class TrackingPlan(Spec):
     version: int
+    name: str = ""
+    status: Literal["current", "proposal", "retired"] = "proposal"
+    description: str = ""
     common_properties: dict[Ident, Property] = {}
     events: dict[Ident, Event] = Field(min_length=1)
 
@@ -98,6 +132,9 @@ class TrackingPlan(Spec):
 
     def properties_of(self, event: str) -> dict[str, Property]:
         return {**self.common_properties, **self.events[event].properties}
+
+    def events_on(self, moment: str) -> list[str]:
+        return [name for name, event in self.events.items() if moment in event.fires_on]
 
 
 # ---------- L2 解析 / Staging ----------
@@ -237,22 +274,13 @@ class MetricLayer(Spec):
 
 # ---------- 模擬設定（只產生假資料）----------
 
-Binding = Literal[
-    "session.platform",
-    "product.id",
-    "product.price",
-    "item.quantity",
-    "cart.total",
-    "cart.count",
-    "order.id",
-]
+# 模擬器的使用者行為；每個行為會產生一或多個 moment
+Action = Literal["view_home", "view_product", "add_to_cart", "checkout", "purchase"]
 
 
 class FunnelStep(Spec):
-    event: Ident
+    action: Action
     repeat: tuple[int, int] = (1, 1)
-    action: Literal["view_product", "add_to_cart", "purchase"] | None = None
-    properties: dict[Ident, Scalar] = {}
 
 
 class Persona(Spec):
@@ -260,7 +288,7 @@ class Persona(Spec):
     sessions_per_week: float = Field(gt=0)
     has_account_rate: float = Field(ge=0, le=1)
     platforms: list[str] = Field(min_length=1)
-    continue_: dict[Ident, float] = Field(default_factory=dict, alias="continue")
+    continue_: dict[Action, float] = Field(default_factory=dict, alias="continue")
 
 
 class Catalog(Spec):
@@ -270,8 +298,18 @@ class Catalog(Spec):
 
 
 class Login(Spec):
-    event: Ident
     rate_per_session: float = Field(ge=0, le=1)
+    methods: list[str] = Field(default_factory=lambda: ["email", "google", "line"], min_length=1)
+
+
+class Behavior(Spec):
+    """和埋點無關、真實世界會發生的事；不同的埋點設計會「看到」不同的部分。"""
+
+    add_to_cart_api_success: float = Field(1.0, ge=0, le=1)
+    coupon_rate: float = Field(0.0, ge=0, le=1)
+    coupon_codes: list[str] = []
+    complete_page_reached: float = Field(1.0, ge=0, le=1)
+    complete_page_reload_rate: float = Field(0.0, ge=0, le=1)
 
 
 class Simulation(Spec):
@@ -281,9 +319,15 @@ class Simulation(Spec):
     visitors: int = Field(gt=0)
     catalog: Catalog
     login: Login | None = None
+    behavior: Behavior = Behavior()
     funnel: list[FunnelStep] = Field(min_length=1)
-    bindings: dict[Ident, Binding] = {}
     personas: dict[Ident, Persona] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _coupons(self) -> Simulation:
+        if self.behavior.coupon_rate > 0 and not self.behavior.coupon_codes:
+            raise ValueError("coupon_rate > 0 時需要 coupon_codes")
+        return self
 
 
 # ---------- 整個專案 ----------
@@ -300,13 +344,11 @@ class Project(Spec):
     @model_validator(mode="after")
     def _cross_references(self) -> Project:
         errors: list[str] = []
-        events = self.tracking_plan.events
 
-        for name, model in self.models.items():
+        # model 的來源事件不在 L1 不算格式錯誤：換一份 tracking plan 時這很常見，由 R3 回報影響範圍
+        for name in self.models:
             if name.startswith(("stg_", "rpt_")):
                 errors.append(f"L3 model '{name}' 不能使用保留前綴 stg_ / rpt_")
-            if model.source != "*" and model.source not in events:
-                errors.append(f"L3 model '{name}': source '{model.source}' 不是 L1 宣告的事件")
 
         metrics = self.metric_layer.metrics
         for name, metric in metrics.items():
@@ -330,31 +372,12 @@ class Project(Spec):
                 f"L4 report '{name}': metric '{m}' 不存在" for m in report.metrics if m not in metrics
             ]
 
-        sim = self.simulation
-        all_properties = set(self.tracking_plan.common_properties)
-        for event in events.values():
-            all_properties |= set(event.properties)
-        for step in sim.funnel:
-            if step.event not in events:
-                errors.append(f"simulation funnel: 事件 '{step.event}' 不在 L1")
-                continue
-            declared = self.tracking_plan.properties_of(step.event)
+        funnel_actions = {step.action for step in self.simulation.funnel}
+        for name, persona in self.simulation.personas.items():
             errors += [
-                f"simulation funnel: 事件 '{step.event}' 沒有 property '{p}'"
-                for p in step.properties
-                if p not in declared
-            ]
-        if sim.login and sim.login.event not in events:
-            errors.append(f"simulation login: 事件 '{sim.login.event}' 不在 L1")
-        errors += [
-            f"simulation bindings: property '{p}' 不在 L1" for p in sim.bindings if p not in all_properties
-        ]
-        funnel_events = {step.event for step in sim.funnel}
-        for name, persona in sim.personas.items():
-            errors += [
-                f"simulation persona '{name}': continue 的 '{e}' 不在 funnel"
-                for e in persona.continue_
-                if e not in funnel_events
+                f"simulation persona '{name}': continue 的 '{a}' 不在 funnel"
+                for a in persona.continue_
+                if a not in funnel_actions
             ]
 
         if errors:
@@ -362,22 +385,52 @@ class Project(Spec):
         return self
 
 
-# 每一層一個檔案，方便各角色只改自己負責的那份
+# L2–L4 與模擬設定每一層一個檔案；L1 可以有多個版本，放在 tracking_plans/
 SPEC_FILES = {
-    "tracking_plan": "l1_tracking_plan.yaml",
     "staging": "l2_staging.yaml",
     "models": "l3_models.yaml",
     "metric_layer": "l4_metrics.yaml",
     "simulation": "simulation.yaml",
 }
+PLANS_DIR = "tracking_plans"
 
 
-def read_spec_files(spec_dir: Path) -> dict[str, Any]:
-    raw: dict[str, Any] = {"name": spec_dir.name}
+def _read_yaml(path: Path) -> Any:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def read_tracking_plans(spec_dir: Path) -> dict[int, dict[str, Any]]:
+    """所有 tracking plan 版本的原始內容，依版本號排序。"""
+    plans: dict[int, dict[str, Any]] = {}
+    for path in sorted((spec_dir / PLANS_DIR).glob("*.yaml")):
+        raw = _read_yaml(path)
+        version = raw.get("version") if isinstance(raw, dict) else None
+        if not isinstance(version, int):
+            raise ValueError(f"{path.name} 沒有整數 version")
+        if version in plans:
+            raise ValueError(f"tracking plan version {version} 重複")
+        plans[version] = raw
+    if not plans:
+        raise ValueError(f"{spec_dir / PLANS_DIR} 裡沒有 tracking plan")
+    return dict(sorted(plans.items()))
+
+
+def default_plan_version(plans: dict[int, dict[str, Any]]) -> int:
+    """status: current 的版本；沒有的話用最新版。"""
+    current = [v for v, raw in plans.items() if raw.get("status") == "current"]
+    return current[-1] if current else max(plans)
+
+
+def read_spec_files(spec_dir: Path, plan_version: int | None = None) -> dict[str, Any]:
+    plans = read_tracking_plans(spec_dir)
+    version = default_plan_version(plans) if plan_version is None else plan_version
+    if version not in plans:
+        raise KeyError(f"沒有 tracking plan v{version}（有：{', '.join(f'v{v}' for v in plans)}）")
+    raw: dict[str, Any] = {"name": spec_dir.name, "tracking_plan": plans[version]}
     for key, filename in SPEC_FILES.items():
-        raw[key] = yaml.safe_load((spec_dir / filename).read_text(encoding="utf-8"))
+        raw[key] = _read_yaml(spec_dir / filename)
     return raw
 
 
-def load_project(spec_dir: Path) -> Project:
-    return Project.model_validate(read_spec_files(spec_dir))
+def load_project(spec_dir: Path, plan_version: int | None = None) -> Project:
+    return Project.model_validate(read_spec_files(spec_dir, plan_version))

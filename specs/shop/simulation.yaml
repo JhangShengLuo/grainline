@@ -1,8 +1,18 @@
 # 合成資料設定 — 只產生假資料
 #
+# 模擬的是「使用者行為」，不是事件：每個行為產生一或多個行為時刻（moment），
+# 再由 tracking plan 的 fires_on 決定送出哪些事件。所以同樣的行為，換一份 tracking plan 會得到不同的事件。
+#
+# 行為與它產生的時刻：
+#   view_home     → page_load(home)
+#   view_product  → page_load(product)、product_detail_load
+#   add_to_cart   → add_to_cart_click，API 成功的話再 add_to_cart_success
+#   checkout      → page_load(checkout)、checkout_load
+#   purchase      → payment_success，到達成功頁的話 order_complete_page_load（可能重新整理再一次）
+# 有帳號的人在第一步之後可能登入 → login_success
+#
 # 每個 visitor 依 persona 權重抽樣；session 數 ~ Poisson(sessions_per_week × days / 7)
-# 每個 session 沿著 funnel 前進，第 2 步之後依 persona 的 continue 機率決定是否繼續
-# property 的值：funnel step 的固定值 → bindings 指定的情境值 → 依 L1 型別隨機產生
+# 第 2 步之後依 persona 的 continue 機率決定是否繼續
 
 seed: 42
 start_date: 2026-09-01
@@ -14,34 +24,27 @@ catalog:
   price_min: 199
   price_max: 4990
 
-# 有帳號的人在每個 session 的第一步之後，有這個機率登入；登入過的裝置會保持登入
+# 有帳號的人在每個 session 第一步之後，有這個機率登入；登入過的裝置會保持登入
 login:
-  event: login
   rate_per_session: 0.5
+  methods: [email, google, line]
+
+# 和埋點無關、真實世界會發生的事
+behavior:
+  add_to_cart_api_success: 0.9      # 加入購物車 API 有 10% 會失敗（庫存不足、逾時）
+  coupon_rate: 0.3                  # 30% 的訂單用了折扣碼
+  coupon_codes: [FALL10, VIP200, APP50]
+  complete_page_reached: 0.92       # 8% 的人付款成功後沒等到成功頁就離開
+  complete_page_reload_rate: 0.06   # 6% 的人在成功頁重新整理
 
 funnel:
-  - event: page_view
-    properties: {page_type: home}
-  - event: product_view
+  - action: view_home
+  - action: view_product
     repeat: [1, 4]
-    action: view_product
-  - event: add_to_cart
+  - action: add_to_cart
     repeat: [1, 2]
-    action: add_to_cart
-  - event: checkout_start
-  - event: order_completed
-    action: purchase
-
-# property 名稱 → 情境值
-bindings:
-  platform: session.platform
-  product_id: product.id
-  price: product.price
-  quantity: item.quantity
-  cart_value: cart.total
-  item_count: cart.count
-  revenue: cart.total
-  order_id: order.id
+  - action: checkout
+  - action: purchase
 
 personas:
   window_shopper:
@@ -49,16 +52,16 @@ personas:
     sessions_per_week: 1.0
     has_account_rate: 0.2
     platforms: [web]
-    continue: {product_view: 0.7, add_to_cart: 0.15, checkout_start: 0.3, order_completed: 0.4}
+    continue: {view_product: 0.7, add_to_cart: 0.15, checkout: 0.3, purchase: 0.4}
   regular:
     weight: 0.3
     sessions_per_week: 2.5
     has_account_rate: 0.7
     platforms: [web, app]
-    continue: {product_view: 0.85, add_to_cart: 0.35, checkout_start: 0.6, order_completed: 0.7}
+    continue: {view_product: 0.85, add_to_cart: 0.35, checkout: 0.6, purchase: 0.7}
   loyal_app:
     weight: 0.1
     sessions_per_week: 4.0
     has_account_rate: 1.0
     platforms: [app]
-    continue: {product_view: 0.9, add_to_cart: 0.5, checkout_start: 0.75, order_completed: 0.85}
+    continue: {view_product: 0.9, add_to_cart: 0.5, checkout: 0.75, purchase: 0.85}

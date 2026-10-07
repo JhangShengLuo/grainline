@@ -1,7 +1,9 @@
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from app.generator import generate_events
-from app.spec import Project
+from app.spec import Project, load_project
+
+from .conftest import SHOP_SPECS
 
 PY_TYPES = {"string": str, "integer": int, "number": (int, float), "boolean": bool}
 
@@ -21,7 +23,9 @@ def test_every_event_conforms_to_tracking_plan(project: Project) -> None:
     plan = project.tracking_plan
     for e in generate_events(project):
         declared = plan.properties_of(e["event_name"])
-        assert set(e["properties"]) == set(declared)
+        # 情境裡沒有值的 property 不帶（例如沒用折扣碼），其他都要有
+        assert set(e["properties"]) <= set(declared)
+        assert {n for n, p in declared.items() if p.required} <= set(e["properties"])
         for name, value in e["properties"].items():
             prop = declared[name]
             assert isinstance(value, PY_TYPES[prop.type]), (e["event_name"], name, value)
@@ -36,7 +40,7 @@ def test_events_cover_whole_period_in_order(project: Project) -> None:
     timestamps = [e["timestamp"] for e in events]
     assert timestamps == sorted(timestamps)
     assert timestamps[0].startswith("2026-09-01")
-    assert timestamps[-1][:10] <= "2026-09-29"
+    assert timestamps[-1] < "2026-09-29"  # 觀察期在 9/28 午夜結束
 
 
 def test_order_revenue_matches_checkout_cart_value(project: Project) -> None:
@@ -51,6 +55,31 @@ def test_order_revenue_matches_checkout_cart_value(project: Project) -> None:
             assert props["revenue"] > 0
             orders += 1
     assert orders > 0
+
+
+def test_v2_optional_properties_follow_context() -> None:
+    v2 = load_project(SHOP_SPECS, 2)
+    for e in generate_events(v2):
+        if e["event_name"] == "page_view":
+            assert ("product_id" in e["properties"]) == (e["properties"]["page_type"] == "product")
+
+
+def test_v2_records_the_same_behavior_differently(project: Project) -> None:
+    v2 = load_project(SHOP_SPECS, 2)
+    counts = {
+        version: Counter(e["event_name"] for e in generate_events(p))
+        for version, p in ((1, project), (2, v2))
+    }
+    # 同樣的人、同樣的行為：沒改到的事件數量完全相同
+    for name in ("page_view", "checkout_start", "login"):
+        assert counts[1][name] == counts[2][name]
+    # 點擊就送：API 失敗的點擊也被記錄
+    assert counts[2]["add_to_cart"] > counts[1]["add_to_cart"]
+    assert "product_view" not in counts[2]
+    orders = [e["properties"]["order_id"] for e in generate_events(v2) if e["event_name"] == "order_completed"]
+    assert len(orders) > len(set(orders))  # 成功頁重新整理造成重複
+    coupons = [e for e in generate_events(v2) if e["event_name"] == "order_completed" and "coupon_code" in e["properties"]]
+    assert 0 < len(coupons) < len(orders)
 
 
 def test_user_id_appears_only_after_login_on_that_device(project: Project) -> None:

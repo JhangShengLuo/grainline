@@ -25,21 +25,21 @@ DEFAULT_SPECS = REPO_ROOT / "specs" / "shop"
 DEFAULT_DB = REPO_ROOT / "data" / "shop.duckdb"
 
 
-def _compile(specs: Path) -> None:
-    for view in compile_project(load_project(specs)):
+def _compile(specs: Path, plan: int | None) -> None:
+    for view in compile_project(load_project(specs, plan)):
         print(f"-- [{view.layer}] {view.name}\ncreate or replace view {view.name} as\n{view.sql};\n")
 
 
-def _build(specs: Path, db: Path) -> None:
+def _build(specs: Path, db: Path, plan: int | None) -> None:
     started = time.perf_counter()
-    project = load_project(specs)
+    project = load_project(specs, plan)
     events = generate_events(project)
     db.parent.mkdir(parents=True, exist_ok=True)
     db.unlink(missing_ok=True)
     lineage = resolve(project)
     with duckdb.connect(str(db)) as con:
         views = build_warehouse(con, project, events, lineage)
-        print(f"raw_events: {len(events):,} 筆合成事件 → {db}")
+        print(f"tracking plan v{project.tracking_plan.version}，raw_events: {len(events):,} 筆合成事件 → {db}")
         for view in views:
             if view.name == "stg_identity":
                 continue
@@ -54,8 +54,8 @@ def _build(specs: Path, db: Path) -> None:
     print(f"完成，用時 {time.perf_counter() - started:.1f} 秒")
 
 
-def _check(specs: Path) -> int:
-    project = load_project(specs)
+def _check(specs: Path, plan: int | None) -> int:
+    project = load_project(specs, plan)
     lineage = resolve(project)
     with duckdb.connect(":memory:") as con:
         build_warehouse(con, project, generate_events(project), lineage)
@@ -83,15 +83,16 @@ def main(argv: list[str] | None = None) -> None:
     for name, help_ in commands:
         p = sub.add_parser(name, help=help_)
         p.add_argument("--specs", type=Path, default=DEFAULT_SPECS)
+        p.add_argument("--plan", type=int, default=None, help="tracking plan 版本（預設 status: current）")
         if name == "build":
             p.add_argument("--db", type=Path, default=DEFAULT_DB)
     args = parser.parse_args(argv)
     if args.command == "compile":
-        _compile(args.specs)
+        _compile(args.specs, args.plan)
     elif args.command == "check":
-        raise SystemExit(_check(args.specs))
+        raise SystemExit(_check(args.specs, args.plan))
     else:
-        _build(args.specs, args.db)
+        _build(args.specs, args.db, args.plan)
 
 
 if __name__ == "__main__":

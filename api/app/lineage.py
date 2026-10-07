@@ -53,7 +53,7 @@ class ColumnInfo:
 
 @dataclass
 class Problem:
-    kind: Literal["missing_property", "missing_column", "type_mismatch", "enum_mismatch"]
+    kind: Literal["missing_event", "missing_property", "missing_column", "type_mismatch", "enum_mismatch"]
     subject: str
     message: str
     hops: tuple[Hop, ...]
@@ -153,6 +153,21 @@ class _Resolver:
 
     def _model(self, name: str, model: Model) -> None:
         view = source_view(model)
+        plan = self.project.tracking_plan
+        if model.source != "*" and model.source not in plan.events:
+            hops = (Hop("L3", name, f"source {model.source}"), Hop("L1", model.source, "✗ 事件不存在"))
+            problem = Problem(
+                "missing_event",
+                name,
+                f"L3 {name} 的來源事件 {model.source} 不在 L1 v{plan.version}：整個 model 無法建立",
+                hops,
+                details={"event": model.source},
+            )
+            self.problems.append(problem)
+            self.columns[name] = {}
+            self.broken_models[name] = problem.message
+            self._model_problems[name] = [problem]
+            return
         fields = stg_fields(self.project, model.source)
         event_desc = "L1 共用 property" if model.source == "*" else f"L1 事件 {model.source}"
         columns: dict[str, ColumnInfo] = {}

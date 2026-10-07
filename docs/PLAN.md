@@ -40,7 +40,7 @@
 
 | 層 | 名稱 | 擁有者 | 內容 | 執行物 |
 |---|---|---|---|---|
-| L1 | 事件契約 Tracking Plan | 前端、PM | event 名稱、property 與型別、觸發時機、identity 欄位（anonymous_id / user_id）、版本 | demo 前端 SDK、合成事件產生器、ingest 驗證 |
+| L1 | 事件契約 Tracking Plan | 前端、PM | event 名稱、在哪個行為時刻送出（`fires_on`）、property 與型別、值從哪裡來（`from`）、版本 | demo 前端 SDK、合成事件產生器、ingest 驗證 |
 | L2 | 解析 / Staging | DE | 原始事件依 L1 驗證、轉型；session 切分；身分合併 | `raw_events`（不可變）→ `stg_*` view |
 | L3 | 實體與事實模型 DW | DE | 實體（user、session、order）、事實表、**宣告 grain** 與主鍵 | `dim_*` / `fct_*` view |
 | L4 | 指標與報表 | BI、行銷 | measure（宣告可加性）、filter、時間 grain、比率 = 分子 / 分母；報表 = 指標 × 維度 × grain | 編譯後的 SQL、報表 JSON |
@@ -135,6 +135,19 @@ L4 引用的每個欄位，都必須能經過 L3、L2 追到 L1 中已宣告的 
 - **刻意留一個未宣告的事件**：商品頁的「收藏」送出 `wishlist_add`，示範前端沒照契約埋點時會發生什麼。
 - **前端部署**：Vite build 後由 nginx 提供，`/api` 轉發到 FastAPI；開發時用 Vite proxy。
 
+### M4 設計決定
+
+- **行為和埋點分開**（這是 M4 最大的改動）：模擬器與 demo 商店只回報「行為時刻」（moment，例如 `add_to_cart_click`、`add_to_cart_success`、`payment_success`、`order_complete_page_load`）和當下情境；L1 用 `fires_on` 決定哪些時刻送哪些事件、用 `from` 決定 property 取什麼值。換一份 tracking plan，商店程式碼和模擬的使用者行為都不用改。
+- **真實世界的行為放在 `simulation.yaml` 的 `behavior`**：加入購物車 API 失敗率、折扣碼使用率、付款後沒等到成功頁、成功頁重新整理。不同的埋點設計「看到」這些行為的不同部分。
+- **兩個版本是同一群人、同樣的行為**：行為用一組亂數、事件 id 與隨機 property 用另一組，所以送出的事件數不同也不會讓行為分岔。`/diff` 只用模擬資料，差異全部來自 tracking plan。
+- **模擬資料截在觀察期結束的午夜**（像資料快照），最後一天不會只剩跨午夜的零星 session。
+- **L1 有多個版本**：`specs/<project>/tracking_plans/v*.yaml`，各自有 `status`（current / proposal / retired）。所有 API 接受 `?plan=`，省略時用 current。每個版本一個倉儲，第一次用到時建立（約 1 秒）。
+- **model 的來源事件不在 L1 不再是格式錯誤**，而是 R3 `missing_event`：換版本時這很常見，應該列出影響範圍而不是整個規格無法載入。
+- **新增 grain 資料檢查（歸在 R1）**：L3 宣告的 grain 在資料上要成立。v2 在成功頁送訂單，重新整理造成重複 order_id，會被抓出來並列出受影響的指標。
+- **property 可以宣告 `required: false`**：情境裡沒有值時不帶（例如沒用折扣碼），SDK 與 ingest 不會因此發 warning。
+- **Console**（`/console`）：報表（圖表 + 表格，點指標名稱看 L4 → L1 計算路徑，含商店點擊的列每 3 秒更新）、相容性檢查（R1–R3 與證據明細）、版本差異（L1 改動、各指標數字差異與相關改動、每日比較圖、報表與 finding 的變化）。
+- **圖表**：單一或兩條線，2px 線、十字準線與 tooltip、兩條線時有圖例與直接標示；兩個類別色經過色盲與對比檢查（淺色、深色各自驗證）；不連續的期間斷線。
+
 ## 7. 驗收標準
 
 ### M0
@@ -169,9 +182,16 @@ L4 引用的每個欄位，都必須能經過 L3、L2 追到 L1 中已宣告的 
 - [x] 付款成功頁重新整理不會重複送出 `order_completed`
 - [x] SDK 有 Vitest 單元測試（批次、重送、身分、L1 比對）；`/ingest` 有 pytest（去重、隔離、重建後保留、即時進報表、證據更新）
 
+### M4
+
+- [x] `specs/shop/tracking_plans/` 有 v1（現行）與 v2（前端提案），v2 包含四種取捨：點擊就送、在成功頁送訂單、併掉 product_view、補上折扣碼
+- [x] `GET /diff` 列出 L1 改動、每個指標兩版的數字與差異及相關改動、報表能否建立、新出現與解決的 finding；同樣行為下沒被改到的指標差異為 0
+- [x] 商店可切換埋點設計；v2 下在成功頁重新整理，同一張訂單會被記兩次並被 grain 檢查抓到，v1 不受影響
+- [x] Console 的報表、相容性檢查、版本差異三頁都可用，資料自動更新
+
 ### 整體（M1–M5 完成時）
 
 - [x] 內建範例規格故意放入三種衝突：週 / 日 UV、母體不一致的轉換率、引用不存在的 property。檢查器逐一抓到，並附數字證據
-- [ ] tracking plan 從 v1 切到 v2，10 秒內報表重算完成並列出受影響指標
-- [ ] 在 demo 商店點一次「加入購物車」，console 上對應指標格 +1，並能點開 L1 → L4 計算路徑
-- [ ] 所有資料都來自產生器或 demo 前端
+- [x] tracking plan 從 v1 切到 v2，10 秒內報表重算完成並列出受影響指標（實測 `/diff` 約 1.5 秒）
+- [x] 在 demo 商店點一次「加入購物車」，console 上對應指標格 +1，並能點開 L1 → L4 計算路徑
+- [x] 所有資料都來自產生器或 demo 前端

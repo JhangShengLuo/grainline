@@ -200,16 +200,20 @@ def _value(project: Project, alias: str, name: str) -> str:
 
 
 def metric_sql(project: Project, name: str, grain: str, dimensions: Sequence[str] = ()) -> str:
-    """任一指標在某個時間 grain 與維度下的 SQL，欄位為 period、各維度、指標名稱。
+    """任一指標在某個時間 grain（day / week / month / all）與維度下的 SQL，欄位為 period、各維度、指標名稱。
 
     呼叫前要先確認血緣沒斷（lineage.broken_metrics）。
     """
     metric = project.metric_layer.metrics[name]
     dims = "".join(f", {d}" for d in dimensions)
 
+    def bucket(column: str) -> str:
+        # grain "all"：整段期間算成一個值（版本比較用）
+        return "cast(null as date)" if grain == "all" else f"cast(date_trunc('{grain}', {column}) as date)"
+
     if isinstance(metric, SimpleMetric):
         return (
-            f"select cast(date_trunc('{grain}', {metric.time_column}) as date) as period{dims},\n"
+            f"select {bucket(metric.time_column)} as period{dims},\n"
             f"    {_measure_sql(metric)} as {name}\n"
             f"from {metric.model}{where_sql(metric)}\n"
             "group by all"
@@ -218,7 +222,7 @@ def metric_sql(project: Project, name: str, grain: str, dimensions: Sequence[str
     if isinstance(metric, RollupMetric):
         inner = metric_sql(project, metric.of, metric.from_grain, dimensions)
         return (
-            f"select cast(date_trunc('{grain}', period) as date) as period{dims},\n"
+            f"select {bucket('period')} as period{dims},\n"
             f"    {metric.agg}({metric.of}) as {name}\n"
             f"from (\n{inner}\n)\n"
             "group by all"

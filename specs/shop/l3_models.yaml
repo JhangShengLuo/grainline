@@ -1,0 +1,88 @@
+# L3 實體與事實模型 — 擁有者：DE
+#
+# kind: fact    一列對應一個來源事件，欄位只能直接取用（from），不能聚合
+# kind: entity  依 grain 分組，非 grain 欄位要宣告 agg
+# grain 宣告「一列代表什麼」，是 L4 可加性檢查的依據
+# from 只能引用來源 stg view 的欄位，這樣每個欄位都能追溯回 L1（血緣可達）
+# source: "*" 代表全部事件（stg_events）
+
+fct_page_views:
+  kind: fact
+  description: 每次頁面瀏覽一列
+  source: page_view
+  grain: [event_id]
+  columns:
+    event_id: {from: event_id}
+    ts: {from: timestamp}
+    person_id: {from: person_id}
+    session_id: {from: session_id}
+    platform: {from: platform}
+    page_type: {from: page_type}
+
+fct_product_views:
+  kind: fact
+  description: 每次商品詳情瀏覽一列
+  source: product_view
+  grain: [event_id]
+  columns:
+    event_id: {from: event_id}
+    ts: {from: timestamp}
+    person_id: {from: person_id}
+    session_id: {from: session_id}
+    platform: {from: platform}
+    product_id: {from: product_id}
+    price: {from: price}
+
+fct_cart_adds:
+  kind: fact
+  description: 每次加入購物車一列
+  source: add_to_cart
+  grain: [event_id]
+  columns:
+    event_id: {from: event_id}
+    ts: {from: timestamp}
+    person_id: {from: person_id}
+    session_id: {from: session_id}
+    platform: {from: platform}
+    product_id: {from: product_id}
+    price: {from: price}
+    quantity: {from: quantity}
+
+fct_orders:
+  kind: fact
+  description: 每筆訂單一列
+  source: order_completed
+  grain: [order_id]
+  columns:
+    order_id: {from: order_id}
+    ts: {from: timestamp}
+    person_id: {from: person_id}
+    session_id: {from: session_id}
+    platform: {from: platform}
+    revenue: {from: revenue}
+    item_count: {from: item_count}
+
+dim_sessions:
+  kind: entity
+  description: 每個 session 一列
+  source: "*"
+  grain: [session_id]
+  columns:
+    session_id: {from: session_id}
+    person_id: {from: person_id, agg: any_value}
+    platform: {from: platform, agg: any_value}
+    started_at: {from: timestamp, agg: min}
+    ended_at: {from: timestamp, agg: max}
+    event_count: {agg: count}
+
+dim_persons:
+  kind: entity
+  description: 每個人一列（依 L2 身分合併規則）
+  source: "*"
+  grain: [person_id]
+  columns:
+    person_id: {from: person_id}
+    first_seen_at: {from: timestamp, agg: min}
+    last_seen_at: {from: timestamp, agg: max}
+    session_count: {from: session_id, agg: count_distinct}
+    event_count: {agg: count}

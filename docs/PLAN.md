@@ -100,6 +100,16 @@ L4 引用的每個欄位，都必須能經過 L3、L2 追到 L1 中已宣告的 
 - **M4：** 報表頁、tracking plan 版本切換與 diff
 - **M5：** 角色化檢視（業務看得懂的「行為 → 數字」解釋）
 
+### M1 設計決定
+
+- **一層一個 YAML 檔**，放在 `specs/<project>/`：`l1_tracking_plan.yaml`、`l2_staging.yaml`、`l3_models.yaml`、`l4_metrics.yaml`，加上 `simulation.yaml`。每個檔案開頭寫明擁有者與語法。
+- **信封欄位由系統固定**：`event_id, event_name, timestamp, anonymous_id, user_id, tracking_plan_version` 不在 L1 宣告；L1 只宣告 property。時間一律是台北時間、不帶時區。
+- **L2 是設定，不是 SQL**：只有 session 逾時與身分合併策略（`stitch_to_user` / `anonymous_only`）。每個事件自動產生一個依 L1 型別轉好的 `stg_<event>`；L1 沒宣告的事件進 `stg_unknown_events`，不流到下游。
+- **L3 不允許寫自由 SQL**：欄位只能 `from` 來源 stg view 的欄位（fact），或加上 `agg`（entity）。代價是表達力有限，換來的是每個欄位都能機械地追回 L1，R3 才做得到。
+- **比率在報表 grain 上由分子、分母的彙總值相除**，不對比率本身加總。
+- **合成資料可重現**：同一個 `seed` 產生完全相同的事件。property 值來源依序為 funnel 固定值 → bindings 情境值（商品、購物車、訂單）→ 依 L1 型別隨機。
+- **名稱一律小寫 snake_case**，在 spec 層就擋掉，所以 compiler 可以直接把名稱放進 SQL，只需要跳脫值。
+
 ## 7. 驗收標準
 
 ### M0
@@ -108,6 +118,14 @@ L4 引用的每個欄位，都必須能經過 L3、L2 追到 L1 中已宣告的 
 - [ ] `docker compose ps` 顯示 api 為 `healthy`
 - [ ] `docker compose run --rm api pytest` 全部通過
 - [ ] repo 中沒有任何真實資料
+
+### M1
+
+- [x] `specs/shop/` 內 L1–L4 與模擬設定皆通過 schema 驗證；壞掉的規格會列出所有錯誤，且指出是哪一層、哪個名稱
+- [x] 同一個 seed 產生完全相同的事件，且每個事件的 property 名稱、型別、enum 都符合 L1
+- [x] `python -m app.cli build` 產生約 4 萬筆假事件並建立 L2–L4 view，1 秒內完成
+- [x] 手工事件精確驗證：30 分鐘 session 切分、身分合併回溯生效、未宣告事件隔離、型別轉換失敗為 NULL、比率由期間彙總值相除
+- [x] 假資料上確實出現「週 UV < 日 UV 加總」，留給 M2 的 R1 抓
 
 ### 整體（M1–M5 完成時）
 

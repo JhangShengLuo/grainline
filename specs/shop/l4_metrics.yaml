@@ -1,0 +1,92 @@
+# L4 指標與報表 — 擁有者：BI、行銷
+#
+# simple metric：model + time_column + measure + 可加性
+#   additivity:
+#     additive       可以跨時間、跨維度直接加總（例：訂單數、營收）
+#     semi_additive  可跨維度加總，但不能跨時間加總（例：庫存、會員數快照）
+#     non_additive   不能加總（例：不重複人數、比率）
+# ratio metric：numerator / denominator，必定 non_additive。
+#   報表會先在報表的 grain 上分別算出分子、分母，再相除，不會對比率本身做加總。
+# report：metrics × dimensions × time_grain（day / week / month），編譯成 rpt_<name> view
+
+metrics:
+  uv:
+    label: 不重複訪客
+    model: fct_page_views
+    time_column: ts
+    measure: {agg: count_distinct, column: person_id}
+    additivity: non_additive
+
+  page_views:
+    label: 頁面瀏覽數
+    model: fct_page_views
+    time_column: ts
+    measure: {agg: count}
+    additivity: additive
+
+  sessions:
+    label: 造訪次數
+    model: dim_sessions
+    time_column: started_at
+    measure: {agg: count}
+    additivity: additive
+
+  product_views:
+    label: 商品瀏覽數
+    model: fct_product_views
+    time_column: ts
+    measure: {agg: count}
+    additivity: additive
+
+  cart_adders:
+    label: 加入購物車人數
+    model: fct_cart_adds
+    time_column: ts
+    measure: {agg: count_distinct, column: person_id}
+    additivity: non_additive
+
+  orders:
+    label: 訂單數
+    model: fct_orders
+    time_column: ts
+    measure: {agg: count}
+    additivity: additive
+
+  revenue:
+    label: 營收
+    model: fct_orders
+    time_column: ts
+    measure: {agg: sum, column: revenue}
+    additivity: additive
+
+  buyers:
+    label: 購買人數
+    model: fct_orders
+    time_column: ts
+    measure: {agg: count_distinct, column: person_id}
+    additivity: non_additive
+
+  conversion_rate:
+    type: ratio
+    label: 購買轉換率
+    description: 購買人數 / 不重複訪客（同一個人、同一個期間）
+    numerator: buyers
+    denominator: uv
+
+  aov:
+    type: ratio
+    label: 平均訂單金額
+    numerator: revenue
+    denominator: orders
+
+reports:
+  daily_overview:
+    label: 每日總覽
+    time_grain: day
+    metrics: [uv, sessions, page_views, orders, revenue, conversion_rate, aov]
+
+  weekly_by_platform:
+    label: 各平台每週表現
+    time_grain: week
+    dimensions: [platform]
+    metrics: [uv, cart_adders, buyers, conversion_rate, revenue]

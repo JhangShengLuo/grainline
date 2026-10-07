@@ -1,10 +1,13 @@
 services:
   api:
-    build: ./api
+    build:
+      context: .
+      dockerfile: api/Dockerfile
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/data
+      - ./data:/repo/data
+      - ./specs:/repo/specs
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s

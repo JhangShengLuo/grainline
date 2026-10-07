@@ -1,0 +1,14 @@
+# L2 解析 / Staging — 擁有者：DE
+#
+# 原始事件依 L1 驗證、轉型後產生：
+#   stg_events            所有 L1 宣告過的事件，加上 person_id、session_id、共用 property
+#   stg_<event>           每個事件一個 view，property 已轉成 L1 宣告的型別（轉型失敗為 NULL）
+#   stg_unknown_events    L1 沒宣告的事件（不會流到下游）
+
+# 同一裝置兩個事件間隔超過幾分鐘就切成新的 session
+session_timeout_minutes: 30
+
+# 身分合併：
+#   stitch_to_user  同一裝置登入過，登入前的匿名事件也算同一人（回溯生效）
+#   anonymous_only  一個裝置就是一個人，不合併
+identity: stitch_to_user

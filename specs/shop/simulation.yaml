@@ -1,0 +1,64 @@
+# 合成資料設定 — 只產生假資料
+#
+# 每個 visitor 依 persona 權重抽樣；session 數 ~ Poisson(sessions_per_week × days / 7)
+# 每個 session 沿著 funnel 前進，第 2 步之後依 persona 的 continue 機率決定是否繼續
+# property 的值：funnel step 的固定值 → bindings 指定的情境值 → 依 L1 型別隨機產生
+
+seed: 42
+start_date: 2026-09-01
+days: 28
+visitors: 1500
+
+catalog:
+  size: 60
+  price_min: 199
+  price_max: 4990
+
+# 有帳號的人在每個 session 的第一步之後，有這個機率登入；登入過的裝置會保持登入
+login:
+  event: login
+  rate_per_session: 0.5
+
+funnel:
+  - event: page_view
+    properties: {page_type: home}
+  - event: product_view
+    repeat: [1, 4]
+    action: view_product
+  - event: add_to_cart
+    repeat: [1, 2]
+    action: add_to_cart
+  - event: checkout_start
+  - event: order_completed
+    action: purchase
+
+# property 名稱 → 情境值
+bindings:
+  platform: session.platform
+  product_id: product.id
+  price: product.price
+  quantity: item.quantity
+  cart_value: cart.total
+  item_count: cart.count
+  revenue: cart.total
+  order_id: order.id
+
+personas:
+  window_shopper:
+    weight: 0.6
+    sessions_per_week: 1.0
+    has_account_rate: 0.2
+    platforms: [web]
+    continue: {product_view: 0.7, add_to_cart: 0.15, checkout_start: 0.3, order_completed: 0.4}
+  regular:
+    weight: 0.3
+    sessions_per_week: 2.5
+    has_account_rate: 0.7
+    platforms: [web, app]
+    continue: {product_view: 0.85, add_to_cart: 0.35, checkout_start: 0.6, order_completed: 0.7}
+  loyal_app:
+    weight: 0.1
+    sessions_per_week: 4.0
+    has_account_rate: 1.0
+    platforms: [app]
+    continue: {product_view: 0.9, add_to_cart: 0.5, checkout_start: 0.75, order_completed: 0.85}

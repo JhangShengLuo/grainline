@@ -6,6 +6,8 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "duckdb>=1.1",
+    "pydantic>=2.6",
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
@@ -23,3 +25,6 @@ packages = ["app"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[project.scripts]
+grainline = "app.cli:main"

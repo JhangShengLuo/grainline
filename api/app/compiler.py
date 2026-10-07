@@ -162,7 +162,7 @@ def _model_view(project: Project, lineage: Lineage, name: str) -> View | None:
 # ---------- L4 ----------
 
 
-def _filter_sql(f: Filter) -> str:
+def filter_sql(f: Filter) -> str:
     if isinstance(f.value, list):
         values = ", ".join(literal(v) for v in f.value)
         return f"{f.column} {'in' if f.op == 'in' else 'not in'} ({values})"
@@ -173,10 +173,10 @@ def _filter_sql(f: Filter) -> str:
 def where_sql(metric: SimpleMetric) -> str:
     if not metric.filters:
         return ""
-    return "\nwhere " + " and ".join(_filter_sql(f) for f in metric.filters)
+    return "\nwhere " + " and ".join(filter_sql(f) for f in metric.filters)
 
 
-def _measure_sql(metric: SimpleMetric) -> str:
+def measure_sql(metric: SimpleMetric) -> str:
     m = metric.measure
     match m.agg:
         case "count":
@@ -214,7 +214,7 @@ def metric_sql(project: Project, name: str, grain: str, dimensions: Sequence[str
     if isinstance(metric, SimpleMetric):
         return (
             f"select {bucket(metric.time_column)} as period{dims},\n"
-            f"    {_measure_sql(metric)} as {name}\n"
+            f"    {measure_sql(metric)} as {name}\n"
             f"from {metric.model}{where_sql(metric)}\n"
             "group by all"
         )

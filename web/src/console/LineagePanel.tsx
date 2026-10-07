@@ -1,3 +1,5 @@
+import { Link } from "react-router-dom";
+
 import { planQuery, useApi } from "./api";
 import type { Hop, LineageNode } from "./types";
 
@@ -62,6 +64,9 @@ export function LineagePanel({ metric, plan, onClose }: { metric: string; plan: 
         <h2>計算路徑</h2>
         <button type="button" className="link" onClick={onClose}>關閉</button>
       </div>
+      <p className="small">
+        <Link to={{ pathname: `/console/metrics/${metric}`, search: planQuery(plan) }}>看白話說明與實際例子 →</Link>
+      </p>
       {error && <p className="warning-text">{error.message}</p>}
       {data ? <Node node={data} /> : !error && <p className="muted">載入中…</p>}
     </aside>

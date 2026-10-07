@@ -23,7 +23,9 @@ from pydantic import ValidationError
 
 from .catalog import catalog_items
 from .checks import Finding, check_project, effective_additivity, metric_format
+from .compiler import compile_project
 from .diff import compare
+from .explain import event_catalog, explain_metric, metric_list, model_catalog
 from .generator import generate_events
 from .ingest import IngestBatch, IncomingEvent, LiveStore, plan_warnings
 from .lineage import Lineage, metric_lineage, resolve
@@ -204,20 +206,42 @@ def create_app(spec_dir: Path | None = None, data_dir: Path | None = None) -> Fa
     def metrics(plan: int | None = PlanParam) -> list[dict[str, Any]]:
         with workspace.lock:
             state = workspace.state(plan)
+            guide = {m["name"]: m for m in metric_list(state.project, state.lineage, state.findings())}
         project = state.project
         return [
             {
-                "name": name,
-                "label": metric.label,
+                **guide[name],
                 "description": metric.description,
-                "type": metric.type,
                 "declared_additivity": getattr(metric, "additivity", None),
                 "additivity": effective_additivity(project, name),
                 "format": metric_format(project, name),
-                "broken": state.lineage.broken_metrics.get(name),
             }
             for name, metric in project.metric_layer.metrics.items()
         ]
+
+    @app.get("/metrics/{name}/explain")
+    def explain(name: str, plan: int | None = PlanParam, example: int = Query(0, ge=0)) -> dict[str, Any]:
+        """給業務看的白話說明：步驟、注意事項，以及一個模擬使用者的例子。"""
+        with workspace.lock:
+            state = workspace.state(plan)
+            if name not in state.project.metric_layer.metrics:
+                raise HTTPException(404, f"沒有指標 {name}")
+            return explain_metric(state.project, state.lineage, state.findings(), state.con, name, example)
+
+    @app.get("/events")
+    def events(plan: int | None = PlanParam) -> dict[str, Any]:
+        """給前端／PM 的埋點清單。"""
+        with workspace.lock:
+            state = workspace.state(plan)
+            return event_catalog(state.project, state.lineage, state.con)
+
+    @app.get("/models")
+    def models(plan: int | None = PlanParam) -> dict[str, Any]:
+        """給 DE 的資料模型。"""
+        with workspace.lock:
+            state = workspace.state(plan)
+            views = compile_project(state.project, state.lineage)
+            return model_catalog(state.project, state.lineage, state.findings(), views, state.con)
 
     @app.get("/metrics/{name}/lineage")
     def lineage(name: str, plan: int | None = PlanParam) -> dict[str, Any]:

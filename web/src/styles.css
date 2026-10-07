@@ -71,7 +71,8 @@ button.link.danger { color: var(--danger); margin-top: 0.75rem; }
   border-bottom: 1px solid var(--border);
 }
 .brand { font-weight: 700; color: var(--text); text-decoration: none; }
-.shop-nav { display: flex; gap: 1rem; align-items: center; flex: 1; }
+.shop-nav { display: flex; gap: 0.4rem 1rem; align-items: center; flex: 1; flex-wrap: wrap; }
+.shop-nav a, .shop-nav button { white-space: nowrap; }
 .shop-nav a { color: var(--text); text-decoration: none; }
 .shop-nav a.active { color: var(--accent); font-weight: 600; }
 .badge { margin-left: 4px; background: var(--accent); color: var(--accent-text); border-radius: 999px; padding: 0 7px; font-size: 0.75rem; }
@@ -227,3 +228,30 @@ table.data td.small { white-space: normal; min-width: 260px; }
 .evidence { background: var(--surface-2); border-radius: 6px; padding: 0.4rem 0.6rem; }
 .chip-code { margin-right: 0.35rem; background: var(--surface-2); border-radius: 4px; padding: 0 4px; }
 details summary { cursor: pointer; color: var(--accent); font-size: 0.85rem; }
+
+/* ---------- M5 角色檢視 ---------- */
+.nav-sep { width: 1px; align-self: stretch; background: var(--border); }
+.shop-nav a.nav-other { color: var(--muted); font-size: 0.9rem; }
+.metric-grid { list-style: none; padding: 0; margin: 1rem 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.75rem; }
+.metric-card p { margin: 0.4rem 0 0; }
+.metric-card-head { display: flex; justify-content: space-between; gap: 0.5rem; align-items: baseline; }
+.explain { max-width: 960px; }
+.explain .lead { font-size: 1.15rem; margin: 0.25rem 0 0.5rem; }
+.explain h3 { font-size: 1rem; margin: 1rem 0 0.5rem; }
+.steps { list-style: none; padding: 0; margin: 0.5rem 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.steps li { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 0.75rem; padding: 0.55rem 0.75rem; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.steps li.broken { border-color: var(--warning-text); background: var(--warning-bg); color: var(--warning-text); }
+.step-title { font-weight: 600; display: flex; gap: 0.4rem; align-items: baseline; }
+.step-title .layer { font-size: 0.7rem; color: var(--muted); font-weight: 400; }
+.parts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
+@media (max-width: 640px) { .steps li { grid-template-columns: minmax(0, 1fr); gap: 0.2rem; } }
+.caveats { list-style: none; padding: 0; margin: 0.5rem 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.caveats li { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); gap: 0.5rem; padding: 0.5rem 0.75rem; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); font-size: 0.9rem; }
+.caveats .severity.info { color: var(--muted); }
+.timeline tr.marked td { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
+.tag.mark { background: var(--accent); color: var(--accent-text); }
+.event-card .event-name { font-size: 1rem; }
+.callout ul { margin: 0.3rem 0; padding-left: 1.2rem; }
+pre.sql { background: var(--surface-2); padding: 0.75rem; border-radius: 8px; overflow-x: auto; font-size: 0.78rem; line-height: 1.45; }
+a.chip-code { text-decoration: none; display: inline-block; margin-bottom: 0.2rem; }
+.meta { display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; }

@@ -1,8 +1,11 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { ChecksPage } from "./console/ChecksPage";
-import { ConsoleLayout } from "./console/ConsoleLayout";
+import { ConsoleHome, ConsoleLayout } from "./console/ConsoleLayout";
 import { DiffPage } from "./console/DiffPage";
+import { EventsPage } from "./console/EventsPage";
+import { MetricDetailPage, MetricsPage } from "./console/MetricsPage";
+import { ModelsPage } from "./console/ModelsPage";
 import { ReportsPage } from "./console/ReportsPage";
 import { CartProvider } from "./shop/CartContext";
 import { ShopLayout } from "./shop/ShopLayout";
@@ -40,7 +43,11 @@ export function App() {
         <Route path="login" element={<LoginPage />} />
       </Route>
       <Route path="/console" element={<ConsoleLayout />}>
-        <Route index element={<Navigate to="reports" replace />} />
+        <Route index element={<ConsoleHome />} />
+        <Route path="metrics" element={<MetricsPage />} />
+        <Route path="metrics/:name" element={<MetricDetailPage />} />
+        <Route path="events" element={<EventsPage />} />
+        <Route path="models" element={<ModelsPage />} />
         <Route path="reports" element={<ReportsPage />} />
         <Route path="checks" element={<ChecksPage />} />
         <Route path="diff" element={<DiffPage />} />

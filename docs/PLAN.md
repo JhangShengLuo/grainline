@@ -124,6 +124,17 @@ L4 引用的每個欄位，都必須能經過 L3、L2 追到 L1 中已宣告的 
 - **篩選值不在 L1 enum 裡算 R3 error 但不斷鏈**：SQL 跑得動，只是數字永遠是 0。
 - **API 會偵測規格檔變動**：下一個請求自動重新產生假資料、重建倉儲（約 1 秒）。
 
+### M3 設計決定
+
+- **`POST /ingest` 只接收，不拒收**：只驗證信封格式（缺欄位才回 422），和 L1 不符的地方回傳 warning，事件照樣保存，由 L2 隔離或轉型（schema-on-read）。依 `event_id` 去重，SDK 重送是安全的。
+- **`raw_events.source`** 區分 `sim`（模擬器）與 `live`（demo 商店）。live 事件另存在 `data/live_events_<project>.ndjson`，規格改動、倉儲重建時一併載入。
+- **時間**：SDK 送 UTC ISO 字串，ingest 轉成台北時間、不帶時區（L1 約定）。
+- **SDK 不綁定事件**：`track(name, props)` 由呼叫端決定；啟動時讀 `GET /tracking-plan`，送出前在瀏覽器端比對 L1。每個平台各有一個 `anonymous_id`（像不同裝置）；`identify` 後才帶 `user_id`。批次送出、失敗重送、頁面關閉時用 `sendBeacon`。
+- **觸發時機照 L1 寫**：`add_to_cart` 在 API 成功後才送；`order_completed` 在付款成功頁載入時送，且同一張訂單重新整理不會再送（否則違反 `fct_orders` 的 grain）。
+- **商店右側的埋點紀錄面板**：每個事件旁邊顯示 L1 的觸發時機、properties、瀏覽器端與伺服器的 warning；「伺服器解析（L2）」分頁顯示 person_id、session_id、是否被隔離。
+- **刻意留一個未宣告的事件**：商品頁的「收藏」送出 `wishlist_add`，示範前端沒照契約埋點時會發生什麼。
+- **前端部署**：Vite build 後由 nginx 提供，`/api` 轉發到 FastAPI；開發時用 Vite proxy。
+
 ## 7. 驗收標準
 
 ### M0
@@ -148,6 +159,15 @@ L4 引用的每個欄位，都必須能經過 L3、L2 追到 L1 中已宣告的 
 - [x] `python -m app.cli check` 印出 finding 與證據，有 error 時 exit code 為 1
 - [x] 每種違規都有改壞規格的測試；精確數字用手工事件驗證
 - [x] 修改規格檔後，下一個 API 請求就反映新結果（測試：補上 coupon_code 埋點後 R3 消失、報表可建立）
+
+### M3
+
+- [x] `docker compose up` 後 `http://localhost:8080/shop` 可以完整走過：首頁 → 分類 → 商品 → 加入購物車 → 結帳 → 付款 → 完成 → 登入
+- [x] 每個事件都符合 L1；「收藏」的 `wishlist_add` 會被標示並隔離
+- [x] 在商店下一張單，`GET /reports/daily_overview` 當天的 orders 立即 +1
+- [x] 登入後，同一裝置登入前的事件回溯歸到同一個 person
+- [x] 付款成功頁重新整理不會重複送出 `order_completed`
+- [x] SDK 有 Vitest 單元測試（批次、重送、身分、L1 比對）；`/ingest` 有 pytest（去重、隔離、重建後保留、即時進報表、證據更新）
 
 ### 整體（M1–M5 完成時）
 

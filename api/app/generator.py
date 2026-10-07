@@ -188,6 +188,11 @@ class _Generator:
         return props
 
 
+def product_catalog(project: Project) -> list[Product]:
+    """和合成事件用的是同一份商品（同一個 seed），demo 商店也用它。"""
+    return _Generator(project).catalog
+
+
 def generate_events(project: Project) -> list[dict[str, Any]]:
     """依 simulation.seed 產生確定性的合成事件，依時間排序。"""
     return _Generator(project).run()

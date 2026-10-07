@@ -17,8 +17,13 @@ def spec_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def client(spec_dir: Path) -> TestClient:
-    return TestClient(create_app(spec_dir))
+def data_dir(tmp_path: Path) -> Path:
+    return tmp_path / "data"
+
+
+@pytest.fixture
+def client(spec_dir: Path, data_dir: Path) -> TestClient:
+    return TestClient(create_app(spec_dir, data_dir))
 
 
 def test_checks_returns_findings_with_evidence(client: TestClient) -> None:

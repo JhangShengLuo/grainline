@@ -23,15 +23,18 @@ RAW_COLUMNS = {
     "tracking_plan_version": "INTEGER",
     "properties": "JSON",
 }
+# 事件從哪裡來：sim（模擬器）或 live（demo 商店的真實點擊）。這是 ingest 的中繼資料，不屬於 L1。
+SOURCES = ("sim", "live")
 
 
 def create_raw_events(con: duckdb.DuckDBPyConnection) -> None:
     columns = ", ".join(f"{name} {type_}" for name, type_ in RAW_COLUMNS.items())
-    con.execute(f"create table if not exists raw_events ({columns})")
+    con.execute(f"create table if not exists raw_events ({columns}, source VARCHAR)")
 
 
-def load_events(con: duckdb.DuckDBPyConnection, events: Iterable[dict[str, Any]]) -> int:
+def load_events(con: duckdb.DuckDBPyConnection, events: Iterable[dict[str, Any]], source: str = "sim") -> int:
     """把事件附加進 raw_events（只新增、不修改），回傳新增筆數。"""
+    assert source in SOURCES
     create_raw_events(con)
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "events.ndjson"
@@ -45,7 +48,7 @@ def load_events(con: duckdb.DuckDBPyConnection, events: Iterable[dict[str, Any]]
         names = ", ".join(RAW_COLUMNS)
         types = "{" + ", ".join(f"'{n}': '{t}'" for n, t in RAW_COLUMNS.items()) + "}"
         con.execute(
-            f"insert into raw_events select {names} "
+            f"insert into raw_events select {names}, '{source}' "
             f"from read_json(?, format = 'newline_delimited', columns = {types})",
             [str(path)],
         )

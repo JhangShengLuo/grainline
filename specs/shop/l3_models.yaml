@@ -61,6 +61,8 @@ fct_orders:
     platform: {from: platform}
     revenue: {from: revenue}
     item_count: {from: item_count}
+    # ⚠ 刻意放的衝突（R3 血緣可達）：BI 以為訂單會帶折扣碼，但 L1 的 order_completed 沒有宣告 coupon_code
+    coupon_code: {from: coupon_code}
 
 dim_sessions:
   kind: entity

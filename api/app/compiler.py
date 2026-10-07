@@ -2,6 +2,7 @@
 
 所有 view 都建在不可變的 raw_events 上，查詢時才計算：改了 YAML 只要重新編譯，不需要 backfill。
 所有名稱都已經過 spec 的 snake_case 檢查，所以可以直接放進 SQL；只有值需要跳脫。
+血緣斷掉的欄位、model、報表會被跳過（R3 會報告原因）；strict=True 時改為直接報錯。
 """
 
 from __future__ import annotations
@@ -12,9 +13,8 @@ from typing import Literal
 
 import duckdb
 
-from .spec import Column, Filter, Model, Project, Property, SimpleMetric
-
-DUCK_TYPES = {"string": "VARCHAR", "integer": "BIGINT", "number": "DOUBLE", "boolean": "BOOLEAN"}
+from .lineage import DUCK_TYPES, Lineage, resolve, source_view
+from .spec import Column, Filter, Project, Property, RatioMetric, RollupMetric, SimpleMetric
 
 STG_BASE_COLUMNS = (
     "event_id",
@@ -29,6 +29,7 @@ STG_BASE_COLUMNS = (
 
 # 沒有資料的期間要顯示 0 而不是 NULL 的聚合
 _ZERO_WHEN_EMPTY = {"count", "count_distinct", "sum"}
+GRAINS = ("day", "week", "month")
 
 
 @dataclass(frozen=True)
@@ -146,22 +147,16 @@ def _column_expr(column: Column) -> str:
     return f"{column.agg}({column.from_})"
 
 
-def _model_view(name: str, model: Model, views: dict[str, View], errors: list[str]) -> View | None:
-    source = "stg_events" if model.source == "*" else f"stg_{model.source}"
-    available = set(views[source].columns) - {"properties"}
-    missing = [
-        f"L3 {name}.{col}: 來源 {source} 沒有欄位 '{c.from_}'（可用：{', '.join(sorted(available))}）"
-        for col, c in model.columns.items()
-        if c.from_ is not None and c.from_ not in available
-    ]
-    if missing:
-        errors += missing
+def _model_view(project: Project, lineage: Lineage, name: str) -> View | None:
+    if name in lineage.broken_models:
         return None
-    select = ",\n    ".join(f"{_column_expr(c)} as {col}" for col, c in model.columns.items())
-    sql = f"select\n    {select}\nfrom {source}"
+    model = project.models[name]
+    usable = lineage.usable_columns(name)
+    select = ",\n    ".join(f"{_column_expr(model.columns[col])} as {col}" for col in usable)
+    sql = f"select\n    {select}\nfrom {source_view(model)}"
     if model.kind == "entity":
         sql += "\ngroup by " + ", ".join(model.columns[g].from_ for g in model.grain)
-    return View(name=name, layer="L3", sql=sql, columns=tuple(model.columns))
+    return View(name=name, layer="L3", sql=sql, columns=tuple(usable))
 
 
 # ---------- L4 ----------
@@ -175,6 +170,12 @@ def _filter_sql(f: Filter) -> str:
     return f"{f.column} {ops[f.op]} {literal(f.value)}"
 
 
+def where_sql(metric: SimpleMetric) -> str:
+    if not metric.filters:
+        return ""
+    return "\nwhere " + " and ".join(_filter_sql(f) for f in metric.filters)
+
+
 def _measure_sql(metric: SimpleMetric) -> str:
     m = metric.measure
     match m.agg:
@@ -185,112 +186,102 @@ def _measure_sql(metric: SimpleMetric) -> str:
     return f"{m.agg}({m.column})"
 
 
-def metric_query(
-    project: Project,
-    metric_name: str,
-    grain: str,
-    dimensions: Sequence[str],
-    views: dict[str, View],
-) -> tuple[str | None, list[str]]:
-    """單一 simple metric 在某個時間 grain 與維度下的 SQL。回傳 (sql, errors)。"""
-    metric = project.metric_layer.metrics[metric_name]
-    assert isinstance(metric, SimpleMetric)
-    view = views.get(metric.model)
-    if view is None:
-        return None, [f"L4 metric '{metric_name}': L3 model '{metric.model}' 編譯失敗"]
-    needed = [metric.time_column, *dimensions, *(f.column for f in metric.filters)]
-    if metric.measure.column:
-        needed.append(metric.measure.column)
-    errors = [
-        f"L4 metric '{metric_name}': model {metric.model} 沒有欄位 '{c}'（可用：{', '.join(view.columns)}）"
-        for c in dict.fromkeys(needed)
-        if c not in view.columns
-    ]
-    if errors:
-        return None, errors
+def zero_when_empty(project: Project, name: str) -> bool:
+    metric = project.metric_layer.metrics[name]
+    if isinstance(metric, SimpleMetric):
+        return metric.measure.agg in _ZERO_WHEN_EMPTY
+    if isinstance(metric, RollupMetric):
+        return metric.agg == "sum" and zero_when_empty(project, metric.of)
+    return False
+
+
+def _value(project: Project, alias: str, name: str) -> str:
+    return f"coalesce({alias}.{name}, 0)" if zero_when_empty(project, name) else f"{alias}.{name}"
+
+
+def metric_sql(project: Project, name: str, grain: str, dimensions: Sequence[str] = ()) -> str:
+    """任一指標在某個時間 grain 與維度下的 SQL，欄位為 period、各維度、指標名稱。
+
+    呼叫前要先確認血緣沒斷（lineage.broken_metrics）。
+    """
+    metric = project.metric_layer.metrics[name]
     dims = "".join(f", {d}" for d in dimensions)
-    sql = (
-        f"select cast(date_trunc('{grain}', {metric.time_column}) as date) as period{dims},\n"
-        f"    {_measure_sql(metric)} as {metric_name}\n"
-        f"from {metric.model}"
+
+    if isinstance(metric, SimpleMetric):
+        return (
+            f"select cast(date_trunc('{grain}', {metric.time_column}) as date) as period{dims},\n"
+            f"    {_measure_sql(metric)} as {name}\n"
+            f"from {metric.model}{where_sql(metric)}\n"
+            "group by all"
+        )
+
+    if isinstance(metric, RollupMetric):
+        inner = metric_sql(project, metric.of, metric.from_grain, dimensions)
+        return (
+            f"select cast(date_trunc('{grain}', period) as date) as period{dims},\n"
+            f"    {metric.agg}({metric.of}) as {name}\n"
+            f"from (\n{inner}\n)\n"
+            "group by all"
+        )
+
+    # 比率：先在同一個 grain 上分別算出分子、分母，再相除；不會對比率本身做加總
+    assert isinstance(metric, RatioMetric)
+    keys = ["period", *dimensions]
+    num, den = metric.numerator, metric.denominator
+    select_keys = ", ".join(f"coalesce(n.{k}, d.{k}) as {k}" for k in keys)
+    on = " and ".join(f"n.{k} is not distinct from d.{k}" for k in keys)
+    return (
+        f"select {select_keys},\n"
+        f"    cast({_value(project, 'n', num)} as double) / nullif({_value(project, 'd', den)}, 0) as {name}\n"
+        f"from (\n{metric_sql(project, num, grain, dimensions)}\n) n\n"
+        f"full join (\n{metric_sql(project, den, grain, dimensions)}\n) d on {on}"
     )
-    if metric.filters:
-        sql += "\nwhere " + " and ".join(_filter_sql(f) for f in metric.filters)
-    return sql + "\ngroup by all", []
 
 
-def _report_view(project: Project, name: str, views: dict[str, View], errors: list[str]) -> View | None:
-    report = project.metric_layer.reports[name]
-    metrics = project.metric_layer.metrics
-    dims = report.dimensions
-
-    # 比率展開成分子、分母；比率在報表 grain 上由分子分母的彙總值相除，不會對比率本身做加總
-    simple: list[str] = []
-    for m in report.metrics:
-        metric = metrics[m]
-        parts = [m] if isinstance(metric, SimpleMetric) else [metric.numerator, metric.denominator]
-        simple += [p for p in parts if p not in simple]
-
-    ctes, report_errors = [], []
-    for m in simple:
-        sql, errs = metric_query(project, m, report.time_grain, dims, views)
-        report_errors += errs
-        if sql:
-            ctes.append(f"m_{m} as (\n{sql}\n)")
-    if report_errors:
-        errors += [f"L4 report '{name}': {e}" for e in report_errors]
+def _report_view(project: Project, lineage: Lineage, name: str) -> View | None:
+    if name in lineage.broken_reports:
         return None
+    report = project.metric_layer.reports[name]
+    dims = report.dimensions
+    keys = ["period", *dims]
 
-    key_cols = ", ".join(["period", *dims])
-    keys = "\nunion\n".join(f"select {key_cols} from m_{m}" for m in simple)
-    ctes.append(f"keys as (\n{keys}\n)")
-
-    def value(m: str) -> str:
-        metric = metrics[m]
-        assert isinstance(metric, SimpleMetric)
-        if metric.measure.agg in _ZERO_WHEN_EMPTY:
-            return f"coalesce(m_{m}.{m}, 0)"
-        return f"m_{m}.{m}"
-
-    select = [f"k.{c}" for c in ["period", *dims]]
-    for m in report.metrics:
-        metric = metrics[m]
-        if isinstance(metric, SimpleMetric):
-            select.append(f"{value(m)} as {m}")
-        else:
-            num, den = value(metric.numerator), value(metric.denominator)
-            select.append(f"cast({num} as double) / nullif({den}, 0) as {m}")
-
+    ctes = [
+        f"m_{m} as (\n{metric_sql(project, m, report.time_grain, dims)}\n)" for m in report.metrics
+    ]
+    union = "\nunion\n".join(f"select {', '.join(keys)} from m_{m}" for m in report.metrics)
+    ctes.append(f"keys as (\n{union}\n)")
     joins = "".join(
-        f"\nleft join m_{m} on m_{m}.period = k.period"
-        + "".join(f" and m_{m}.{d} is not distinct from k.{d}" for d in dims)
-        for m in simple
+        f"\nleft join m_{m} on " + " and ".join(f"m_{m}.{k} is not distinct from k.{k}" for k in keys)
+        for m in report.metrics
     )
+    select = [f"k.{k}" for k in keys] + [f"{_value(project, f'm_{m}', m)} as {m}" for m in report.metrics]
     sql = (
         "with " + ",\n".join(ctes)
         + "\nselect " + ", ".join(select)
         + "\nfrom keys k" + joins
-        + "\norder by " + ", ".join(f"k.{c}" for c in ["period", *dims])
+        + "\norder by " + ", ".join(f"k.{k}" for k in keys)
     )
-    return View(name=f"rpt_{name}", layer="L4", sql=sql, columns=("period", *dims, *report.metrics))
+    return View(name=f"rpt_{name}", layer="L4", sql=sql, columns=(*keys, *report.metrics))
 
 
 # ---------- 入口 ----------
 
 
-def compile_project(project: Project) -> list[View]:
-    """依相依順序回傳所有 view；任何一層有錯就一次列出全部錯誤。"""
-    errors: list[str] = []
-    views = {v.name: v for v in _staging_views(project)}
-    for name, model in project.models.items():
-        if view := _model_view(name, model, views, errors):
-            views[name] = view
+def compile_project(project: Project, lineage: Lineage | None = None, strict: bool = False) -> list[View]:
+    """依相依順序回傳所有可建立的 view。strict=True 時，血緣有任何斷鏈就一次列出全部錯誤。"""
+    lineage = lineage or resolve(project)
+    if strict:
+        errors = [p.message for p in lineage.problems if p.breaking]
+        if errors:
+            raise CompileError(errors)
+    views = _staging_views(project)
+    for name in project.models:
+        if view := _model_view(project, lineage, name):
+            views.append(view)
     for name in project.metric_layer.reports:
-        if view := _report_view(project, name, views, errors):
-            views[view.name] = view
-    if errors:
-        raise CompileError(errors)
-    return list(views.values())
+        if view := _report_view(project, lineage, name):
+            views.append(view)
+    return views
 
 
 def apply_views(con: duckdb.DuckDBPyConnection, views: Sequence[View]) -> None:

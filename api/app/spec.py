@@ -188,9 +188,25 @@ class RatioMetric(Spec):
     type: Literal["ratio"]
     label: str
     description: str = ""
+    # rate：分子是分母的子集（轉換率），per_unit：每單位平均（客單價）
+    kind: Literal["rate", "per_unit"] = "rate"
     numerator: Ident
     denominator: Ident
     additivity: Literal["non_additive"] = "non_additive"
+
+
+TimeGrain = Literal["day", "week", "month"]
+
+
+class RollupMetric(Spec):
+    """先在 from_grain 算出 of，再用 agg 彙總到報表的 grain。例：週 UV = 日 UV 加總。"""
+
+    type: Literal["rollup"]
+    label: str
+    description: str = ""
+    of: Ident
+    from_grain: TimeGrain
+    agg: Literal["sum", "avg", "min", "max"]
 
 
 def _metric_type(value: Any) -> str:
@@ -200,14 +216,16 @@ def _metric_type(value: Any) -> str:
 
 
 Metric = Annotated[
-    Annotated[SimpleMetric, Tag("simple")] | Annotated[RatioMetric, Tag("ratio")],
+    Annotated[SimpleMetric, Tag("simple")]
+    | Annotated[RatioMetric, Tag("ratio")]
+    | Annotated[RollupMetric, Tag("rollup")],
     Discriminator(_metric_type),
 ]
 
 
 class Report(Spec):
     label: str
-    time_grain: Literal["day", "week", "month"]
+    time_grain: TimeGrain
     dimensions: list[Ident] = []
     metrics: list[Ident] = Field(min_length=1)
 
@@ -295,6 +313,12 @@ class Project(Spec):
             if isinstance(metric, SimpleMetric):
                 if metric.model not in self.models:
                     errors.append(f"L4 metric '{name}': model '{metric.model}' 不存在於 L3")
+                continue
+            if isinstance(metric, RollupMetric):
+                if metric.of not in metrics:
+                    errors.append(f"L4 metric '{name}': '{metric.of}' 不存在")
+                elif isinstance(metrics[metric.of], RollupMetric):
+                    errors.append(f"L4 metric '{name}': 不能 rollup 另一個 rollup '{metric.of}'")
                 continue
             for part in (metric.numerator, metric.denominator):
                 if part not in metrics:

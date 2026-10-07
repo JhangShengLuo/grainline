@@ -110,6 +110,20 @@ L4 引用的每個欄位，都必須能經過 L3、L2 追到 L1 中已宣告的 
 - **合成資料可重現**：同一個 `seed` 產生完全相同的事件。property 值來源依序為 funnel 固定值 → bindings 情境值（商品、購物車、訂單）→ 依 L1 型別隨機。
 - **名稱一律小寫 snake_case**，在 spec 層就擋掉，所以 compiler 可以直接把名稱放進 SQL，只需要跳脫值。
 
+### M2 設計決定
+
+- **L4 新增兩個可以「寫錯」的語法**，檢查器才有東西可抓：
+  - `type: rollup`：先在 `from_grain` 算出某指標，再用 `agg` 彙總到報表 grain（例：週 UV = 日 UV 加總）。
+  - ratio 的 `kind`：`rate`（分子 ⊆ 分母，例：轉換率）或 `per_unit`（每單位平均，例：客單價），兩者的 R2 檢查不同。
+- **實際可加性由 measure 推導，不只看宣告**：`count_distinct / avg / min / max` 一律不可加；宣告成 additive 本身就是 R1 error。
+- **R1 也檢查 grain 能否整齊切分**：日可以切進週和月，週不能切進月。
+- **R2 的計數單位**：`count_distinct x` 的單位是 x 代表的實體；`count` 的單位是「該 model 的列」。分母的每個篩選都必須出現在分子。
+- **R2 也做實測**：規格正確的 rate，仍會在假資料上量「分子不在同期分母裡」的實體數，有的話給 warning（範例中抓到跨午夜的 session）。
+- **新增 `lineage` 模組作為單一真相**：每個 L3 欄位、L4 引用都追到 L1，帶型別與 enum。compiler 用它決定能建什麼，R3 用它產生 finding。
+- **編譯改為容錯**：斷鏈的欄位從 model view 移除，用到它的指標、報表被跳過並列在 finding 的「影響」中；其他部分照常建立。`strict=True` 時直接報錯。
+- **篩選值不在 L1 enum 裡算 R3 error 但不斷鏈**：SQL 跑得動，只是數字永遠是 0。
+- **API 會偵測規格檔變動**：下一個請求自動重新產生假資料、重建倉儲（約 1 秒）。
+
 ## 7. 驗收標準
 
 ### M0
@@ -127,9 +141,17 @@ L4 引用的每個欄位，都必須能經過 L3、L2 追到 L1 中已宣告的 
 - [x] 手工事件精確驗證：30 分鐘 session 切分、身分合併回溯生效、未宣告事件隔離、型別轉換失敗為 NULL、比率由期間彙總值相除
 - [x] 假資料上確實出現「週 UV < 日 UV 加總」，留給 M2 的 R1 抓
 
+### M2
+
+- [x] `GET /checks` 回傳 R1–R3 finding，每個都附 `evidence.summary` 與明細列；`?rule=R1` 可篩選
+- [x] `GET /metrics`（含實際可加性）、`GET /metrics/{name}/lineage`（L4 → L1 路徑）、`GET /reports`、`GET /reports/{name}`（斷鏈報表回 409 與原因）
+- [x] `python -m app.cli check` 印出 finding 與證據，有 error 時 exit code 為 1
+- [x] 每種違規都有改壞規格的測試；精確數字用手工事件驗證
+- [x] 修改規格檔後，下一個 API 請求就反映新結果（測試：補上 coupon_code 埋點後 R3 消失、報表可建立）
+
 ### 整體（M1–M5 完成時）
 
-- [ ] 內建範例規格故意放入三種衝突：週 / 日 UV、母體不一致的轉換率、引用不存在的 property。檢查器逐一抓到，並附數字證據
+- [x] 內建範例規格故意放入三種衝突：週 / 日 UV、母體不一致的轉換率、引用不存在的 property。檢查器逐一抓到，並附數字證據
 - [ ] tracking plan 從 v1 切到 v2，10 秒內報表重算完成並列出受影響指標
 - [ ] 在 demo 商店點一次「加入購物車」，console 上對應指標格 +1，並能點開 L1 → L4 計算路徑
 - [ ] 所有資料都來自產生器或 demo 前端

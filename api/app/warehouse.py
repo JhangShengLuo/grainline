@@ -11,6 +11,7 @@ from typing import Any
 import duckdb
 
 from .compiler import View, apply_views, compile_project
+from .lineage import Lineage
 from .spec import Project
 
 RAW_COLUMNS = {
@@ -52,9 +53,12 @@ def load_events(con: duckdb.DuckDBPyConnection, events: Iterable[dict[str, Any]]
 
 
 def build_warehouse(
-    con: duckdb.DuckDBPyConnection, project: Project, events: Iterable[dict[str, Any]]
+    con: duckdb.DuckDBPyConnection,
+    project: Project,
+    events: Iterable[dict[str, Any]],
+    lineage: Lineage | None = None,
 ) -> list[View]:
     load_events(con, events)
-    views = compile_project(project)
+    views = compile_project(project, lineage)
     apply_views(con, views)
     return views

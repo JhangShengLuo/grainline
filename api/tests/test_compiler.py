@@ -164,7 +164,7 @@ def test_model_referencing_undeclared_property_fails_to_compile(project: Project
         update={"models": {**project.models, "fct_orders": model.model_copy(update={"columns": columns})}}
     )
     with pytest.raises(CompileError, match="coupon_code"):
-        compile_project(broken)
+        compile_project(broken, strict=True)
 
 
 def test_report_dimension_missing_on_model_fails_to_compile(project: Project) -> None:
@@ -178,6 +178,23 @@ def test_report_dimension_missing_on_model_fails_to_compile(project: Project) ->
         }
     )
     with pytest.raises(CompileError, match="page_type") as info:
-        compile_project(broken)
-    # page_type 只在 fct_page_views，其他 model 都應該被列出來
-    assert len(info.value.errors) >= 3
+        compile_project(broken, strict=True)
+    # page_type 只在 fct_page_views，fct_cart_adds 和 fct_orders 都應該被列出來
+    assert sum("page_type" in e for e in info.value.errors) >= 2
+
+
+def test_lenient_compile_skips_only_what_is_broken(project: Project) -> None:
+    names = {v.name for v in compile_project(project)}
+    # 範例規格刻意讓 fct_orders.coupon_code 斷鏈：只有用到它的報表被跳過
+    assert "fct_orders" in names and "rpt_daily_overview" in names
+    assert "rpt_promotion_weekly" not in names
+
+
+def test_broken_column_is_dropped_from_model_view(shop: duckdb.DuckDBPyConnection) -> None:
+    columns = [r[0] for r in shop.execute("select column_name from (describe fct_orders)").fetchall()]
+    assert "revenue" in columns and "coupon_code" not in columns
+
+
+def test_rollup_report_column_matches_daily_sum(shop: duckdb.DuckDBPyConnection) -> None:
+    rolled = _scalar(shop, "select sum(weekly_uv_from_daily) from rpt_marketing_weekly")
+    assert rolled == _scalar(shop, "select sum(uv) from rpt_daily_overview")

@@ -6,7 +6,10 @@
 #     semi_additive  可跨維度加總，但不能跨時間加總（例：庫存、會員數快照）
 #     non_additive   不能加總（例：不重複人數、比率）
 # ratio metric：numerator / denominator，必定 non_additive。
+#   kind: rate      分子必須是分母的子集（例：轉換率）
+#   kind: per_unit  每單位平均，分子分母來自同一個 model、同樣的篩選（例：客單價）
 #   報表會先在報表的 grain 上分別算出分子、分母，再相除，不會對比率本身做加總。
+# rollup metric：先在 from_grain 算出 of，再用 agg 彙總到報表的 grain（只有 of 可加時才正確）
 # report：metrics × dimensions × time_grain（day / week / month），編譯成 rpt_<name> view
 
 metrics:
@@ -75,9 +78,34 @@ metrics:
 
   aov:
     type: ratio
+    kind: per_unit
     label: 平均訂單金額
     numerator: revenue
     denominator: orders
+
+  web_uv:
+    label: Web 不重複訪客
+    model: fct_page_views
+    time_column: ts
+    measure: {agg: count_distinct, column: person_id}
+    additivity: non_additive
+    filters:
+      - {column: platform, op: eq, value: web}
+
+  # ⚠ 刻意放的衝突（R1 可加性）：把每日 UV 加起來當週 UV，同一個人在一週內來好幾天就被算好幾次
+  weekly_uv_from_daily:
+    type: rollup
+    label: 週 UV（日 UV 加總）
+    of: uv
+    from_grain: day
+    agg: sum
+
+  # ⚠ 刻意放的衝突（R2 比率母體）：分母只算 web，分子忘了加 platform = web，會把 app 的買家也算進來
+  web_conversion_rate:
+    type: ratio
+    label: Web 購買轉換率
+    numerator: buyers
+    denominator: web_uv
 
 reports:
   daily_overview:
@@ -90,3 +118,14 @@ reports:
     time_grain: week
     dimensions: [platform]
     metrics: [uv, cart_adders, buyers, conversion_rate, revenue]
+
+  marketing_weekly:
+    label: 行銷週報
+    time_grain: week
+    metrics: [uv, weekly_uv_from_daily, web_uv, web_conversion_rate]
+
+  promotion_weekly:
+    label: 折扣碼成效週報
+    time_grain: week
+    dimensions: [coupon_code]
+    metrics: [orders, revenue]

@@ -3,6 +3,7 @@
     python -m app.cli compile          # 只印出編譯後的 SQL
     python -m app.cli build            # 產生假資料、建立 DuckDB 倉儲、印出摘要
     python -m app.cli check            # 在假資料上跑 R1–R3，印出 finding 與數字證據
+    python -m app.cli export           # 匯出 dbt-style SQL 或 golden file
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import duckdb
 
 from .checks import check_project
 from .compiler import compile_project
+from .exporter import export_dbt_sql, export_golden_file
 from .generator import generate_events
 from .lineage import resolve
 from .spec import load_project
@@ -72,6 +74,22 @@ def _check(specs: Path, plan: int | None) -> int:
     return 1 if errors else 0
 
 
+def _export(specs: Path, output: Path, plan: int | None, golden: bool) -> None:
+    project = load_project(specs, plan)
+    lineage = resolve(project)
+    views = compile_project(project, lineage)
+    
+    if golden:
+        golden_path = output / "golden.sql"
+        export_golden_file(views, golden_path)
+        print(f"Golden file: {golden_path}")
+    else:
+        results = export_dbt_sql(views, output)
+        print(f"Exported {len(results)} files to {output}/")
+        for r in results:
+            print(f"  [{r.layer}] {r.path.name}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="grainline")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -79,6 +97,7 @@ def main(argv: list[str] | None = None) -> None:
         ("compile", "印出編譯後的 SQL"),
         ("build", "產生假資料並建立 DuckDB 倉儲"),
         ("check", "在假資料上跑 R1–R3 相容性檢查"),
+        ("export", "匯出 dbt-style SQL 或 golden file"),
     )
     for name, help_ in commands:
         p = sub.add_parser(name, help=help_)
@@ -86,11 +105,16 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--plan", type=int, default=None, help="tracking plan 版本（預設 status: current）")
         if name == "build":
             p.add_argument("--db", type=Path, default=DEFAULT_DB)
+        if name == "export":
+            p.add_argument("--output", type=Path, default=REPO_ROOT / "export" / "dbt")
+            p.add_argument("--golden", action="store_true", help="匯出單一 golden file 而非多個 dbt SQL")
     args = parser.parse_args(argv)
     if args.command == "compile":
         _compile(args.specs, args.plan)
     elif args.command == "check":
         raise SystemExit(_check(args.specs, args.plan))
+    elif args.command == "export":
+        _export(args.specs, args.output, args.plan, args.golden)
     else:
         _build(args.specs, args.db, args.plan)
 

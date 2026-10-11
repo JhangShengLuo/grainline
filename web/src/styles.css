@@ -303,3 +303,8 @@ a.chip-code { text-decoration: none; display: inline-block; margin-bottom: 0.2re
 .explain-block h3 { margin: 0 0 0.3rem; font-size: 0.95rem; }
 .explain-block ul { margin: 0; padding-left: 1.1rem; font-size: 0.85rem; }
 .explain-block li { margin: 0.25rem 0; }
+
+/* ---------- M10 AI 提案 ---------- */
+.field.wide { max-width: none; }
+.field textarea { font: inherit; padding: 0.5rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); resize: vertical; }
+.chips button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }

@@ -16,11 +16,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import anthropic
 import duckdb
 import yaml
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
+from .assistant import MODEL, make_client, propose_playbook, save_playbook
 from .catalog import catalog_items
 from .checks import Finding, check_project, effective_additivity, metric_format
 from .compiler import compile_project
@@ -136,7 +138,19 @@ def _exists(con: duckdb.DuckDBPyConnection, event_id: str) -> bool:
     return con.execute("select count(*) from raw_events where event_id = ?", [event_id]).fetchone()[0] > 0
 
 
-def create_app(spec_dir: Path | None = None, data_dir: Path | None = None) -> FastAPI:
+class PlaybookRequest(BaseModel):
+    request: str = Field(min_length=4, max_length=500)
+    plan: int | None = None
+
+
+class SavePlaybook(BaseModel):
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    decision: dict[str, Any]
+
+
+def create_app(
+    spec_dir: Path | None = None, data_dir: Path | None = None, llm_client: Any | None = None
+) -> FastAPI:
     workspace = Workspace(
         spec_dir or Path(os.environ.get("GRAINLINE_SPECS", DEFAULT_SPECS)),
         data_dir or Path(os.environ.get("GRAINLINE_DATA", DEFAULT_DATA)),
@@ -319,6 +333,51 @@ def create_app(spec_dir: Path | None = None, data_dir: Path | None = None) -> Fa
             path = save_proposal(workspace.spec_dir, proposal)
         return {"version": proposal["version"], "filename": proposal["filename"], "path": str(path),
                 "changes": proposal["changes"]}
+
+    # ---------- AI 提案 ----------
+
+    def client() -> Any | None:
+        return llm_client if llm_client is not None else make_client()
+
+    @app.get("/assistant/status")
+    def assistant_status() -> dict[str, Any]:
+        available = client() is not None
+        return {
+            "available": available,
+            "model": MODEL,
+            "reason": None if available else "沒有設定 ANTHROPIC_API_KEY：在 .env 加上金鑰後重新啟動 api。",
+        }
+
+    @app.post("/assistant/playbooks")
+    def assistant_playbook(body: PlaybookRequest) -> dict[str, Any]:
+        """自然語言 → L5 劇本：Claude 提案，規則引擎驗證，不通過就讓它修正（還不會寫入）。"""
+        llm = client()
+        if llm is None:
+            raise HTTPException(503, "沒有設定 ANTHROPIC_API_KEY")
+        with workspace.lock:
+            state = workspace.state(body.plan, include_live=False)
+            cursor = state.con.cursor()  # 呼叫 Claude 要等一陣子，不要鎖住其他請求
+            project = state.project
+        try:
+            return propose_playbook(llm, project, cursor, body.request)
+        except anthropic.APIStatusError as exc:
+            raise HTTPException(502, f"Claude API 錯誤（{exc.status_code}）：{exc.message}") from exc
+        except anthropic.APIConnectionError as exc:
+            raise HTTPException(502, "連不到 Claude API") from exc
+        finally:
+            cursor.close()
+
+    @app.post("/assistant/playbooks/save")
+    def save_assistant_playbook(body: SavePlaybook) -> dict[str, Any]:
+        with workspace.lock:
+            state = workspace.state()
+            try:
+                save_playbook(workspace.spec_dir / "l5_decisions.yaml", body.name, body.decision, state.project)
+            except FileExistsError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            except ValidationError as exc:
+                raise HTTPException(422, [str(e["msg"]) for e in exc.errors()]) from exc
+        return {"name": body.name}
 
     @app.get("/events")
     def events(plan: int | None = PlanParam) -> dict[str, Any]:

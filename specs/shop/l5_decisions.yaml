@@ -1,0 +1,29 @@
+# L5 決策劇本 — 擁有者：行銷（經營者）
+#
+# 以終為始：先寫要做什麼決策，工具反推需要哪些指標、表、事件，以及前端要在哪個行為時刻埋什麼。
+# inputs 用的是內建行銷指標庫的指標名稱；必須是可加的指標（才能在時間窗口內加總）。
+# rules 的 value 可以是數字，或 p50 這種「所有候選對象的第 50 百分位」。
+# 結果只是建議清單，不會自動動預算或版位。
+
+potential_products:
+  label: 潛力商品
+  question: 哪些商品看過的人很愛買、但很少人看到？把曝光給它們，最有機會多賺。
+  entity: product_id
+  inputs:
+    impressions: product_impressions
+    views: product_detail_views
+    units: units_ordered
+    margin: gross_margin
+    stockout_days: stockout_days
+  score:
+    label: 每次商品頁瀏覽的預期毛利
+    # 商品轉換率（件數 ÷ 商品頁瀏覽）；瀏覽少的商品往全站平均收斂，避免「3 人看、2 人買」衝到第一
+    rate: {numerator: units, denominator: views, prior_strength: 40}
+    # 乘上每件毛利（沒賣出過的商品用全站平均）
+    multiply: {numerator: margin, denominator: units}
+  rules:
+    - {input: impressions, op: lte, value: p50, why: 曝光在所有商品的中位數以下：目前被埋沒}
+    - {input: views, op: gte, value: 20, why: 至少 20 次商品頁瀏覽，轉換率才有參考價值}
+    - {input: stockout_days, op: lte, value: 2, why: 缺貨不超過 2 天：推了才有貨賣}
+    - {input: margin, op: gt, value: 0, why: 有賺錢}
+  top_k: 5

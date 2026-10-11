@@ -12,7 +12,7 @@ import os
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from .catalog import catalog_items
 from .checks import Finding, check_project, effective_additivity, metric_format
 from .compiler import compile_project
+from .decisions import build_proposal, evaluate, requirements, run_decision, save_proposal
 from .diff import compare
 from .explain import event_catalog, explain_metric, metric_list, model_catalog
 from .generator import World, simulate
@@ -244,6 +245,60 @@ def create_app(spec_dir: Path | None = None, data_dir: Path | None = None) -> Fa
                         for status in ("available", "differs", "buildable", "blocked")},
             "metrics": items,
         }
+
+    # ---------- L5 決策 ----------
+
+    def _decision_state(name: str, plan: int | None, include_live: bool = True) -> State:
+        state = workspace.state(plan, include_live)
+        if name not in state.project.decisions:
+            raise HTTPException(404, f"沒有決策劇本 {name}")
+        return state
+
+    @app.get("/decisions")
+    def decisions(plan: int | None = PlanParam) -> list[dict[str, Any]]:
+        with workspace.lock:
+            state = workspace.state(plan)
+            return [
+                {"name": name, "label": d.label, "question": d.question,
+                 "ready": requirements(state.project, state.lineage, name)["ready"]}
+                for name, d in state.project.decisions.items()
+            ]
+
+    @app.get("/decisions/{name}")
+    def decision(name: str, plan: int | None = PlanParam,
+                 as_of_day: int | None = Query(None, ge=1, description="只用前 N 天的資料")) -> dict[str, Any]:
+        """執行劇本：建議清單、每個候選的分數與規則檢查，以及反推出的需求。"""
+        with workspace.lock:
+            state = _decision_state(name, plan)
+            sim = state.project.simulation
+            as_of = sim.start_date + timedelta(days=as_of_day) if as_of_day else None
+            return run_decision(state.project, state.lineage, state.con, name, as_of)
+
+    @app.get("/decisions/{name}/evaluation")
+    def decision_evaluation(name: str, plan: int | None = PlanParam) -> dict[str, Any]:
+        """用模擬器的真相評估：劇本與傳統選法的命中率、第幾天開始選得準。只用模擬資料。"""
+        with workspace.lock:
+            state = _decision_state(name, plan, include_live=False)
+            return evaluate(state.project, state.lineage, state.con, name, state.world.truth)
+
+    @app.get("/decisions/{name}/proposal")
+    def decision_proposal(name: str, plan: int | None = PlanParam) -> dict[str, Any]:
+        """預覽：讓這個劇本可以執行，tracking plan 要補什麼（還不會寫入）。"""
+        with workspace.lock:
+            state = _decision_state(name, plan)
+            return build_proposal(workspace.spec_dir, state.project, state.lineage, name)
+
+    @app.post("/decisions/{name}/proposal")
+    def create_decision_proposal(name: str, plan: int | None = PlanParam) -> dict[str, Any]:
+        """把提案寫成新的 tracking plan 版本檔案（status: proposal）；寫入後倉儲會自動重建。"""
+        with workspace.lock:
+            state = _decision_state(name, plan)
+            proposal = build_proposal(workspace.spec_dir, state.project, state.lineage, name)
+            if not proposal["needed"]:
+                raise HTTPException(409, "這個 tracking plan 已經能執行這個劇本，不需要提案")
+            path = save_proposal(workspace.spec_dir, proposal)
+        return {"version": proposal["version"], "filename": proposal["filename"], "path": str(path),
+                "changes": proposal["changes"]}
 
     @app.get("/events")
     def events(plan: int | None = PlanParam) -> dict[str, Any]:

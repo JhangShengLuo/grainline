@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { ChecksPage } from "./console/ChecksPage";
 import { ConsoleHome, ConsoleLayout } from "./console/ConsoleLayout";
+import { DecisionPage, DecisionsHome } from "./console/DecisionPage";
 import { DiffPage } from "./console/DiffPage";
 import { EventsPage } from "./console/EventsPage";
 import { LibraryPage } from "./console/LibraryPage";
@@ -45,6 +46,8 @@ export function App() {
       </Route>
       <Route path="/console" element={<ConsoleLayout />}>
         <Route index element={<ConsoleHome />} />
+        <Route path="decisions" element={<DecisionsHome />} />
+        <Route path="decisions/:name" element={<DecisionPage />} />
         <Route path="metrics" element={<MetricsPage />} />
         <Route path="metrics/:name" element={<MetricDetailPage />} />
         <Route path="events" element={<EventsPage />} />

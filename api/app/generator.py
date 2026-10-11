@@ -429,10 +429,14 @@ class _Generator:
         ]
 
     def _truth(self) -> list[dict[str, Any]]:
-        """真正的潛力商品：轉換傾向在前 25%，但實際曝光在後 50%。"""
+        """真正的潛力商品：真實的「每次商品頁瀏覽預期毛利」（轉換傾向 × 每件毛利）在前 25%，但實際曝光在後 50%。
+
+        和選品的目標（賺錢）一致：不只是好賣，而是每多一次曝光、多一次瀏覽，最能多賺。
+        """
         n = len(self.products)
-        by_conversion = sorted(self.products, key=lambda p: p.conversion, reverse=True)
-        top_conversion = {p.id for p in by_conversion[: max(1, n // 4)]}
+        value = {p.id: p.conversion * (p.price - p.cost) for p in self.products}
+        by_value = sorted(self.products, key=lambda p: value[p.id], reverse=True)
+        top_value = {p.id for p in by_value[: max(1, n // 4)]}
         by_exposure = sorted(self.products, key=lambda p: (self.impressions[p.id], p.id))
         low_exposure = {p.id for p in by_exposure[: n // 2]}
         return [
@@ -440,11 +444,12 @@ class _Generator:
                 "product_id": p.id,
                 "attractiveness": round(p.attractiveness, 4),
                 "conversion": round(p.conversion, 4),
+                "value_per_view": round(value[p.id], 2),
                 "rising": p.rising,
                 "launch_day": p.launch_day,
                 "legacy_rank": p.legacy_rank,
                 "impressions": self.impressions[p.id],
-                "is_potential": p.id in top_conversion and p.id in low_exposure,
+                "is_potential": p.id in top_value and p.id in low_exposure,
             }
             for p in self.products
         ]

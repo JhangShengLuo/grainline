@@ -414,6 +414,61 @@ class MetricLayer(Spec):
     reports: dict[Ident, Report] = {}
 
 
+# ---------- L5 決策劇本 ----------
+
+_PERCENTILE = re.compile(r"p(\d{1,2}|100)")
+
+
+class DecisionRule(Spec):
+    """候選條件與防呆：每一條都要寫為什麼，建議清單上會顯示。"""
+
+    input: Ident
+    op: Literal["gt", "gte", "lt", "lte"]
+    value: float | str  # 數字，或 "p50" 這種：所有候選對象的第 50 百分位
+    why: str
+
+    @model_validator(mode="after")
+    def _value(self) -> DecisionRule:
+        if isinstance(self.value, str) and not _PERCENTILE.fullmatch(self.value):
+            raise ValueError(f"value 必須是數字或 p0–p100，不是 '{self.value}'")
+        return self
+
+
+class ShrunkRate(Spec):
+    """numerator ÷ denominator；prior_strength > 0 時，樣本少的往全體平均收斂（相當於多看 prior_strength 次全體平均）。"""
+
+    numerator: Ident
+    denominator: Ident
+    prior_strength: float = Field(0, ge=0)
+
+
+class DecisionScore(Spec):
+    label: str
+    rate: ShrunkRate
+    multiply: ShrunkRate | None = None  # 例如每件毛利；分母為 0 時用全體平均
+
+
+class Decision(Spec):
+    label: str
+    question: str
+    entity: Ident  # 決策對象，例如 product_id（每個輸入指標的 model 都要有這個欄位）
+    window_days: int | None = Field(None, gt=0)  # 看最近幾天；不寫就是整段期間
+    inputs: dict[Ident, Ident] = Field(min_length=1)  # 名稱 → 指標庫裡的指標
+    score: DecisionScore
+    rules: list[DecisionRule] = []
+    top_k: int = Field(5, gt=0)
+
+    @model_validator(mode="after")
+    def _references(self) -> Decision:
+        used = [self.score.rate.numerator, self.score.rate.denominator, *(r.input for r in self.rules)]
+        if self.score.multiply:
+            used += [self.score.multiply.numerator, self.score.multiply.denominator]
+        missing = sorted({u for u in used if u not in self.inputs})
+        if missing:
+            raise ValueError(f"score 與 rules 用到的 {missing} 不在 inputs 裡")
+        return self
+
+
 # ---------- 模擬設定（只產生假資料）----------
 
 # 模擬器的使用者行為；每個行為會產生一或多個 moment
@@ -501,6 +556,7 @@ class Project(Spec):
     staging: Staging
     models: dict[Ident, Model]
     metric_layer: MetricLayer
+    decisions: dict[Ident, Decision] = {}
     simulation: Simulation
 
     @model_validator(mode="after")
@@ -584,8 +640,10 @@ SPEC_FILES = {
     "staging": "l2_staging.yaml",
     "models": "l3_models.yaml",
     "metric_layer": "l4_metrics.yaml",
+    "decisions": "l5_decisions.yaml",
     "simulation": "simulation.yaml",
 }
+OPTIONAL_FILES = {"sources", "decisions"}
 PLANS_DIR = "tracking_plans"
 
 
@@ -623,8 +681,8 @@ def read_spec_files(spec_dir: Path, plan_version: int | None = None) -> dict[str
     raw: dict[str, Any] = {"name": spec_dir.name, "tracking_plan": plans[version]}
     for key, filename in SPEC_FILES.items():
         path = spec_dir / filename
-        if key == "sources" and not path.exists():
-            continue  # 業務資料來源是選用的
+        if key in OPTIONAL_FILES and not path.exists():
+            continue  # 業務資料來源與決策劇本是選用的
         raw[key] = _read_yaml(path)
     return raw
 

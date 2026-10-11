@@ -268,3 +268,31 @@ a.chip-code { text-decoration: none; display: inline-block; margin-bottom: 0.2re
 .library-card.differs { border-color: var(--warning-text); }
 .library-card p { margin: 0.35rem 0 0; }
 .missing { list-style: none; padding: 0; margin: 0.4rem 0 0; display: flex; flex-direction: column; gap: 0.2rem; }
+
+/* ---------- M8 決策 ---------- */
+.decision { max-width: 1100px; }
+.decision .lead { font-size: 1.15rem; margin: 0.25rem 0 1rem; }
+.picks { list-style: none; padding: 0; margin: 0.75rem 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 0.75rem; }
+.pick { cursor: default; }
+.pick-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0.6rem; align-items: center; }
+.rank { width: 1.8rem; height: 1.8rem; border-radius: 999px; background: var(--accent); color: var(--accent-text); display: grid; place-items: center; font-weight: 700; }
+.pick-score { font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
+.pick-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.25rem 0.75rem; margin: 0.6rem 0; font-size: 0.85rem; }
+.pick-stats div { display: flex; flex-direction: column; }
+.pick-stats div:nth-child(4) { grid-column: 1 / -1; }
+.pick-stats dt { color: var(--muted); font-size: 0.75rem; }
+.pick-stats dd { margin: 0; font-variant-numeric: tabular-nums; }
+.checks { list-style: none; padding: 0; margin: 0; font-size: 0.8rem; color: var(--success); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; margin: 0.75rem 0; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem 1rem; }
+.tile.primary-tile { border-color: var(--accent); }
+.tile-value { font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tile-label { font-weight: 600; margin-bottom: 0.2rem; }
+.flow { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 0.5rem; overflow-x: auto; padding-bottom: 0.5rem; }
+.flow-col { display: flex; flex-direction: column; gap: 0.35rem; position: relative; }
+.flow-col h4 { margin: 0 0 0.25rem; font-size: 0.8rem; color: var(--muted); font-weight: 500; }
+.flow-col + .flow-col::before { content: "←"; position: absolute; left: -0.45rem; top: 0; color: var(--muted); font-size: 0.8rem; }
+.flow-node { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.35rem 0.5rem; font-size: 0.82rem; text-decoration: none; color: var(--text); }
+.flow-node.blocked { border-color: var(--danger); }
+.flow-node.differs { border-color: var(--warning-text); }
+@media (max-width: 900px) { .flow { grid-template-columns: repeat(5, 170px); } }

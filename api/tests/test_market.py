@@ -43,8 +43,10 @@ def test_potential_products_are_good_but_buried(world: World) -> None:
     potential = [t for t in world.truth if t["is_potential"]]
     assert potential
     median_impressions = sorted(t["impressions"] for t in world.truth)[len(world.truth) // 2]
+    top_quarter_value = sorted((t["value_per_view"] for t in world.truth), reverse=True)[len(world.truth) // 4 - 1]
     for t in potential:
-        assert t["conversion"] > 1 and t["impressions"] <= median_impressions
+        # 每次瀏覽的預期毛利在前 25%，曝光在中位數以下
+        assert t["value_per_view"] >= top_quarter_value and t["impressions"] <= median_impressions
 
 
 def test_better_converting_products_sell_more_per_view(shop: duckdb.DuckDBPyConnection, world: World) -> None:

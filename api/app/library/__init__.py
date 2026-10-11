@@ -10,15 +10,20 @@ import yaml
 from pydantic import Field, model_validator
 
 from ..lineage import Lineage
-from ..spec import Ident, Moment, PropertyType, Project, Spec
+from ..spec import ContextField, Ident, Moment, PropertyType, Project, Spec
 
 LIBRARY_DIR = Path(__file__).parent
+
+
+class PropertyNeed(Spec):
+    type: PropertyType
+    from_: ContextField | None = Field(None, alias="from")
 
 
 class Need(Spec):
     event: Ident | None = None
     moment: Moment | None = None
-    properties: dict[Ident, PropertyType] = {}
+    properties: dict[Ident, PropertyNeed] = {}
     source: Ident | None = None
     columns: list[Ident] = []
     metric: Ident | None = None
@@ -72,19 +77,20 @@ def _missing_for(project: Project, need: Need) -> list[dict[str, Any]]:
         event = plan.events.get(need.event)
         if event is None:
             return [{"kind": "event", "owner": "前端", "event": need.event, "moment": need.moment,
-                     "what": f"新增事件 {need.event}（在 {need.moment} 時送出，帶 {', '.join(need.properties) or '無'}）"}]
+                     "what": f"新增事件 {need.event}（在 {need.moment} 時送出，帶 {', '.join(need.properties) or '無'}）",
+                     "need": need.model_dump(by_alias=True, exclude_none=True)}]
         missing = []
         if need.moment and need.moment not in event.fires_on:
             missing.append({"kind": "fires_on", "owner": "前端", "event": need.event, "moment": need.moment,
                             "what": f"{need.event} 要在 {need.moment} 時送出（目前是 {', '.join(event.fires_on)}）"})
         declared = plan.properties_of(need.event)
-        for prop, type_ in need.properties.items():
+        for prop, spec in need.properties.items():
             if prop not in declared:
                 missing.append({"kind": "property", "owner": "前端", "event": need.event, "property": prop,
-                                "what": f"{need.event} 加上 {prop}（{type_}）"})
-            elif declared[prop].type != type_:
+                                "what": f"{need.event} 加上 {prop}（{spec.type}）"})
+            elif declared[prop].type != spec.type:
                 missing.append({"kind": "property", "owner": "前端", "event": need.event, "property": prop,
-                                "what": f"{need.event}.{prop} 要是 {type_}（目前是 {declared[prop].type}）"})
+                                "what": f"{need.event}.{prop} 要是 {spec.type}（目前是 {declared[prop].type}）"})
         return missing
     if need.source is not None:
         source = project.sources.get(need.source)
@@ -131,7 +137,7 @@ def coverage(project: Project, lineage: Lineage, library: Library | None = None)
             "why": metric.why,
             "reference": metric.reference,
             "grain": metric.grain,
-            "needs": [n.model_dump(exclude_defaults=True) for n in metric.needs],
+            "needs": [n.model_dump(exclude_defaults=True, by_alias=True) for n in metric.needs],
             "defined": defined,
             "broken": broken,
             "status": status,
@@ -142,3 +148,15 @@ def coverage(project: Project, lineage: Lineage, library: Library | None = None)
     for name in library.metrics:
         resolve(name)
     return [result[name] for name in library.metrics]
+
+
+def event_needs(name: str, library: Library | None = None) -> list[Need]:
+    """一個指標（含它依賴的指標）最終需要的前端事件。"""
+    library = library or load_library()
+    out: list[Need] = []
+    for need in library.metrics[name].needs:
+        if need.metric is not None:
+            out += [n for n in event_needs(need.metric, library) if n not in out]
+        elif need.event is not None and need not in out:
+            out.append(need)
+    return out

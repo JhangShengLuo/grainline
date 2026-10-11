@@ -4,7 +4,7 @@
 # 定義以這裡為準）、grain、需要哪些資料。專案的 L4 用同樣的名稱定義指標，就算「用了這個指標」。
 #
 # needs：
-#   event：需要的前端事件，在哪個行為時刻送出（moment），必須帶哪些 property
+#   event：需要的前端事件，在哪個行為時刻送出（moment），必須帶哪些 property（型別與值從哪裡來）
 #   source：需要的業務資料來源與欄位
 #   metric：需要先有的其他指標（比率）
 
@@ -26,7 +26,7 @@ metrics:
     needs:
       - event: page_view
         moment: page_load
-        properties: {page_type: string}
+        properties: {page_type: {type: string, from: page.type}}
 
   sessions:
     group: traffic
@@ -38,7 +38,7 @@ metrics:
     needs:
       - event: page_view
         moment: page_load
-        properties: {page_type: string}
+        properties: {page_type: {type: string, from: page.type}}
 
   product_impressions:
     group: funnel
@@ -50,7 +50,10 @@ metrics:
     needs:
       - event: product_impression
         moment: product_impression
-        properties: {product_id: string, list_name: string, position: integer}
+        properties:
+          product_id: {type: string, from: product.id}
+          list_name: {type: string, from: list.name}
+          position: {type: integer, from: list.position}
 
   product_detail_views:
     group: funnel
@@ -62,7 +65,7 @@ metrics:
     needs:
       - event: product_view
         moment: product_detail_load
-        properties: {product_id: string}
+        properties: {product_id: {type: string, from: product.id}}
 
   product_ctr:
     group: funnel
@@ -85,7 +88,9 @@ metrics:
     needs:
       - event: add_to_cart
         moment: add_to_cart_success
-        properties: {product_id: string, quantity: integer}
+        properties:
+          product_id: {type: string, from: product.id}
+          quantity: {type: integer, from: item.quantity}
 
   add_to_cart_rate:
     group: funnel

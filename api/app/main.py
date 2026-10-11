@@ -26,6 +26,7 @@ from .checks import Finding, check_project, effective_additivity, metric_format
 from .compiler import compile_project
 from .decisions import build_proposal, evaluate, requirements, run_decision, save_proposal
 from .diff import compare
+from .execution import simulate_execution
 from .explain import event_catalog, explain_metric, metric_list, model_catalog
 from .generator import World, simulate
 from .ingest import IngestBatch, IncomingEvent, LiveStore, plan_warnings
@@ -48,6 +49,7 @@ class State:
     world: World
     built_at: datetime = field(default_factory=datetime.now)
     _findings: list[Finding] | None = None
+    cache: dict[Any, Any] = field(default_factory=dict)
 
     def findings(self) -> list[Finding]:
         """有新的 live 事件時證據要重算，所以延遲到需要時才計算。"""
@@ -280,6 +282,24 @@ def create_app(spec_dir: Path | None = None, data_dir: Path | None = None) -> Fa
         with workspace.lock:
             state = _decision_state(name, plan, include_live=False)
             return evaluate(state.project, state.lineage, state.con, name, state.world.truth)
+
+    @app.get("/decisions/{name}/execution")
+    def decision_execution(
+        name: str,
+        plan: int | None = PlanParam,
+        slots: int = Query(5, ge=1, le=8, description="換掉首頁精選的後幾格"),
+        horizon_days: int = Query(14, ge=7, le=28),
+        replicates: int = Query(5, ge=2, le=10),
+    ) -> dict[str, Any]:
+        """模擬執行：照建議清單換首頁精選，接下來幾天的效果（含範圍、對照組、白話說明）。只用模擬資料。"""
+        with workspace.lock:
+            state = _decision_state(name, plan, include_live=False)
+            key = ("execution", name, slots, horizon_days, replicates)
+            if key not in state.cache:
+                state.cache[key] = simulate_execution(
+                    state.project, state.lineage, state.con, name, slots, horizon_days, replicates
+                )
+            return state.cache[key]
 
     @app.get("/decisions/{name}/proposal")
     def decision_proposal(name: str, plan: int | None = PlanParam) -> dict[str, Any]:

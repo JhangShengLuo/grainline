@@ -3,6 +3,7 @@ import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 
 import { formatPrice } from "../api";
 import { planQuery, usePlanParam, useApi } from "./api";
+import { ExecutionSection } from "./ExecutionSection";
 import { LineChart } from "./LineChart";
 
 interface Check {
@@ -304,6 +305,7 @@ export function DecisionPage() {
             </details>
           </section>
           <EvaluationSection decision={name} plan={plan} />
+          <ExecutionSection decision={name} plan={plan} />
         </>
       )}
 

@@ -104,6 +104,17 @@ class Context:
         raise ValueError(f"未知的情境欄位: {path}")
 
 
+@dataclass(frozen=True)
+class Scenario:
+    """模擬執行用的情境：同一個商品世界（同一份真相），換一組使用者行為的隨機情境、往後模擬幾天、可以改首頁精選。"""
+
+    behavior_seed: int                     # 使用者行為的隨機情境
+    offset_days: int                       # 從原本期間開始算，往後第幾天開始
+    days: int                              # 模擬幾天
+    featured: tuple[str, ...] | None = None  # 首頁精選覆寫（依位置）；None = 維持舊排序
+    record_events: bool = False            # 只要後端資料時不產生前端事件，快很多
+
+
 @dataclass
 class World:
     """模擬的結果：前端事件、後端的業務資料，以及只有模擬器知道的真相。"""
@@ -153,15 +164,22 @@ Moment = Callable[[str], None]
 
 
 class _Generator:
-    def __init__(self, project: Project) -> None:
+    def __init__(self, project: Project, scenario: Scenario | None = None) -> None:
         self.plan = project.tracking_plan
         self.sim = project.simulation
         self.market = self.sim.market
         self.behavior = self.sim.behavior
         self.rng = random.Random(self.sim.seed)
-        self.start = datetime.combine(self.sim.start_date, datetime.min.time())
-        self.end = self.start + timedelta(days=self.sim.days)
+        # 商品世界永遠由 simulation.seed 決定；情境只換使用者行為
         self.products = self._make_products()
+        self.scenario = scenario
+        self.offset = scenario.offset_days if scenario else 0
+        self.days = scenario.days if scenario else self.sim.days
+        self.record_events = scenario.record_events if scenario else True
+        if scenario:
+            self.rng = random.Random(scenario.behavior_seed)
+        self.start = datetime.combine(self.sim.start_date, datetime.min.time()) + timedelta(days=self.offset)
+        self.end = self.start + timedelta(days=self.days)
         self.categories = sorted({p.category for p in self.products})
         # 埋點用的亂數和行為用的亂數分開：換 tracking plan 不會改變使用者的行為
         self.fake_rng = random.Random(self.sim.seed + 1)
@@ -202,9 +220,12 @@ class _Generator:
         return products
 
     def available(self, day: int) -> list[ProductTruth]:
-        return sorted((p for p in self.products if p.launch_day <= day), key=lambda p: p.legacy_rank)
+        return sorted((p for p in self.products if p.launch_day <= day + self.offset), key=lambda p: p.legacy_rank)
 
     def featured(self, day: int) -> list[ProductTruth]:
+        if self.scenario and self.scenario.featured is not None:
+            launched = {p.id: p for p in self.available(day)}
+            return [launched[i] for i in self.scenario.featured if i in launched]
         return self.available(day)[: self.market.featured_slots]
 
     def category_list(self, category: str, day: int) -> list[ProductTruth]:
@@ -217,7 +238,7 @@ class _Generator:
         while self._snapshot_day < day:
             snapshot_date = (self.start + timedelta(days=self._snapshot_day)).date().isoformat()
             for p in self.products:
-                if p.launch_day <= self._snapshot_day:
+                if p.launch_day <= self._snapshot_day + self.offset:
                     self.inventory.append({"date": snapshot_date, "product_id": p.id, "on_hand": self.stock[p.id]})
             self._snapshot_day += 1
             if self._snapshot_day % self.market.restock_days == 0:
@@ -240,7 +261,7 @@ class _Generator:
                 user_id=f"u{i:05d}" if rng.random() < persona.has_account_rate else None,
                 anonymous_ids={p: f"anon-{rng.getrandbits(40):010x}" for p in persona.platforms},
             ))
-            for _ in range(_poisson(rng, persona.sessions_per_week * self.sim.days / 7)):
+            for _ in range(_poisson(rng, persona.sessions_per_week * self.days / 7)):
                 seq += 1
                 heapq.heappush(queue, (self._session_start(), seq, i))
 
@@ -259,7 +280,7 @@ class _Generator:
             self._advance_inventory((start - self.start).days)
             session, visitor.last_end = self._session(visitor, start)
             events += session
-        self._advance_inventory(self.sim.days)
+        self._advance_inventory(self.days)
 
         # 觀察期在最後一天午夜結束（像資料快照）：跨過午夜的 session 只留下之前的部分
         end = self.end.isoformat(sep=" ")
@@ -276,7 +297,7 @@ class _Generator:
     def _session_start(self) -> datetime:
         rng = self.rng
         return self.start + timedelta(
-            days=rng.randrange(self.sim.days),
+            days=rng.randrange(self.days),
             hours=rng.choices(range(24), _HOUR_WEIGHTS)[0],
             minutes=rng.randrange(60),
             seconds=rng.randrange(60),
@@ -295,7 +316,7 @@ class _Generator:
 
         def moment(name: str) -> None:
             """行為時刻：送出 L1 裡 fires_on 這個時刻的所有事件，然後時間往前走。"""
-            for event_name in self.plan.events_on(name):
+            for event_name in self.plan.events_on(name) if self.record_events else ():
                 out.append({
                     "event_id": f"{self.fake_rng.getrandbits(64):016x}",
                     "event_name": event_name,
@@ -367,7 +388,7 @@ class _Generator:
         elif action == "view_product":
             # 點哪個商品：看過的卡片裡依真實吸引力與位置；沒看過任何卡片就從全部商品挑
             candidates = ctx.seen or [(p, 1) for p in self.available(today)]
-            weights = [p.attract_at(day, self.sim.days, market.rising_growth) * market.position_decay ** (pos - 1)
+            weights = [p.attract_at(day + self.offset, self.sim.days, market.rising_growth) * market.position_decay ** (pos - 1)
                        for p, pos in candidates]
             product = rng.choices([p for p, _ in candidates], weights)[0]
             ctx.page_type, ctx.product, ctx.quantity = "product", product, None
@@ -412,8 +433,8 @@ class _Generator:
     # ---------- 輸出 ----------
 
     def product_rows(self) -> list[dict[str, Any]]:
-        """商品目錄（業務資料）：公開的屬性，不含真相。"""
-        first_day = self.start.date()
+        """商品目錄（業務資料）：公開的屬性，不含真相。上架日以原本期間的開始日計，不受情境影響。"""
+        first_day = self.sim.start_date
         return [
             {
                 "product_id": p.id,
@@ -462,9 +483,9 @@ def catalog(project: Project) -> tuple[list[dict[str, Any]], list[str]]:
     return generator.product_rows(), featured
 
 
-def simulate(project: Project) -> World:
-    """依 simulation.seed 產生確定性的模擬世界。"""
-    return _Generator(project).run()
+def simulate(project: Project, scenario: Scenario | None = None) -> World:
+    """依 simulation.seed 產生確定性的模擬世界；給 scenario 時模擬那個情境（同一個商品世界）。"""
+    return _Generator(project, scenario).run()
 
 
 def generate_events(project: Project) -> list[dict[str, Any]]:

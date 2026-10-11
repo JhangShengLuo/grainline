@@ -360,6 +360,22 @@ def _grain_findings(con: duckdb.DuckDBPyConnection, project: Project, lineage: L
     """L3 宣告的 grain 在資料上是否成立：同一個 grain 值不該出現在兩列。"""
     findings = []
     metrics = project.metric_layer.metrics
+    for name, source in project.sources.items():
+        grain = ", ".join(source.grain)
+        rows = _rows(con, f"select {grain}, count(*) as rows from src_{name} group by all having count(*) > 1 "
+                          f"order by rows desc, {grain}")
+        if rows:
+            (total,) = con.execute(f"select count(*) from src_{name}").fetchone()
+            extra = sum(r["rows"] - 1 for r in rows)
+            users = [m for m, model in project.models.items() if model.table == name]
+            findings.append(Finding(
+                "R1", "error", "grain_duplicate", f"source:{name}",
+                f"業務資料 {name}（{source.owner}）宣告一列代表一個 {grain}，但資料裡有 {len(rows):,} 個重複。"
+                "這是資料來源本身的問題，要回頭找擁有者。",
+                [f"model:{m}" for m in users],
+                {"summary": f"src_{name} 共 {total:,} 列，其中 {extra:,} 列是重複的 {grain}",
+                 "duplicate_keys": len(rows), "extra_rows": extra, "rows": rows[:20]},
+            ))
     for name, model in project.models.items():
         if name in lineage.broken_models or any(g not in lineage.usable_columns(name) for g in model.grain):
             continue

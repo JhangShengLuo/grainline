@@ -4,6 +4,7 @@ export type PropertyType = "string" | "integer" | "number" | "boolean";
 /** 行為時刻（和 api/app/spec.py 的 Moment 相同） */
 export type Moment =
   | "page_load"
+  | "product_impression"
   | "product_detail_load"
   | "add_to_cart_click"
   | "add_to_cart_success"
@@ -15,6 +16,7 @@ export type Moment =
 /** 行為時刻的情境；L1 property 的 from（例如 "product.price"）就是取這裡的值 */
 export type MomentContext = Partial<{
   page: { type: string };
+  list: { name: string; position: number };
   product: { id: string; price: number };
   item: { quantity: number };
   cart: { total: number; count: number };

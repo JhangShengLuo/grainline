@@ -1,14 +1,19 @@
-"""依模擬設定產生使用者行為，再依 L1 的 fires_on 把行為轉成事件。只產生假資料。
+"""模擬一個有真相的市場：使用者行為 → 行為時刻 → 依 L1 的 fires_on 轉成事件；後端同時產生業務資料。只產生假資料。
 
 行為和埋點是分開的：模擬器只決定「使用者做了什麼」（行為時刻 moment 與當下情境），
-L1 決定「哪些時刻要送哪些事件、property 的值從哪裡來」。所以同一個 seed 產生的是同一群人、
-同樣的行為；換一份 tracking plan，只有記錄下來的事件不同。
+L1 決定「哪些時刻要送哪些事件、property 的值從哪裡來」。同一個 seed 產生的是同一群人、
+同樣的行為；換一份 tracking plan，只有記錄下來的事件不同，後端的業務資料完全一樣。
+
+市場的真相（每個商品真實的吸引力、轉換傾向、趨勢）只存在模擬器裡，報表看不到。
+首頁精選與分類排序依「舊排序」決定、不看真實品質，所以有好商品被埋沒——這就是要找的潛力商品。
 """
 
 from __future__ import annotations
 
+import heapq
 import math
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -18,7 +23,39 @@ from .spec import Persona, Project, Property
 # 一天中各小時的流量權重（晚上較高）
 _HOUR_WEIGHTS = [1, 1, 1, 1, 1, 1, 2, 3, 4, 5, 5, 6, 7, 6, 5, 5, 6, 7, 8, 9, 10, 9, 6, 3]
 
-Product = tuple[str, float]
+_ADJECTIVES = ["經典", "輕量", "復古", "機能", "極簡", "手工", "日系", "北歐"]
+_NOUNS = [
+    ("帆布鞋", "鞋款"),
+    ("慢跑鞋", "鞋款"),
+    ("托特包", "包袋"),
+    ("後背包", "包袋"),
+    ("棉 T", "服飾"),
+    ("牛仔外套", "服飾"),
+    ("保溫瓶", "生活"),
+    ("馬克杯", "生活"),
+    ("藍牙耳機", "3C"),
+    ("行動電源", "3C"),
+]
+
+
+@dataclass(eq=False)  # 用身分比較與雜湊：每個商品只有一個物件
+class ProductTruth:
+    """一個商品：公開的屬性，加上只有模擬器知道的真相。"""
+
+    id: str
+    name: str
+    category: str
+    price: float
+    cost: float
+    launch_day: int            # 第幾天上架（0 = 期間開始前就在賣）
+    legacy_rank: int           # 舊排序：決定首頁精選與分類頁順序，不看真實品質
+    attractiveness: float      # 真相：商品卡片被點的吸引力
+    conversion: float          # 真相：看了商品頁之後加購的傾向
+    rising: bool               # 真相：吸引力是否隨時間上升
+    initial_stock: int
+
+    def attract_at(self, day: float, days: int, growth: float) -> float:
+        return self.attractiveness * (1 + growth * day / days) if self.rising else self.attractiveness
 
 
 @dataclass
@@ -27,10 +64,13 @@ class Context:
 
     platform: str
     page_type: str | None = None
-    product: Product | None = None
-    viewed: list[Product] = field(default_factory=list)
+    list_name: str | None = None
+    list_position: int | None = None
+    product: ProductTruth | None = None
+    viewed: list[ProductTruth] = field(default_factory=list)
+    seen: list[tuple[ProductTruth, int]] = field(default_factory=list)  # (商品, 位置)
     quantity: int | None = None
-    cart: list[tuple[Product, int]] = field(default_factory=list)
+    cart: list[tuple[ProductTruth, int]] = field(default_factory=list)
     order_id: str | None = None
     coupon_code: str | None = None
     login_method: str | None = None
@@ -41,14 +81,18 @@ class Context:
                 return self.platform
             case "page.type":
                 return self.page_type
+            case "list.name":
+                return self.list_name
+            case "list.position":
+                return self.list_position
             case "product.id":
-                return self.product[0] if self.product else None
+                return self.product.id if self.product else None
             case "product.price":
-                return self.product[1] if self.product else None
+                return self.product.price if self.product else None
             case "item.quantity":
                 return self.quantity
             case "cart.total":
-                return round(sum(price * qty for (_, price), qty in self.cart), 2)
+                return round(sum(p.price * qty for p, qty in self.cart), 2)
             case "cart.count":
                 return sum(qty for _, qty in self.cart)
             case "order.id":
@@ -58,6 +102,24 @@ class Context:
             case "login.method":
                 return self.login_method
         raise ValueError(f"未知的情境欄位: {path}")
+
+
+@dataclass
+class World:
+    """模擬的結果：前端事件、後端的業務資料，以及只有模擬器知道的真相。"""
+
+    events: list[dict[str, Any]]
+    tables: dict[str, list[dict[str, Any]]]
+    truth: list[dict[str, Any]]
+
+
+@dataclass
+class _Visitor:
+    persona: Persona
+    user_id: str | None
+    anonymous_ids: dict[str, str]
+    logged_in: set[str] = field(default_factory=set)
+    last_end: datetime | None = None
 
 
 def _poisson(rng: random.Random, lam: float) -> int:
@@ -82,51 +144,134 @@ def _fake(name: str, prop: Property, rng: random.Random) -> Any:
     return f"{name}-{rng.getrandbits(24):06x}"
 
 
+def _lognormal(rng: random.Random, sigma: float) -> float:
+    """平均為 1 的對數常態。"""
+    return math.exp(rng.gauss(-sigma * sigma / 2, sigma))
+
+
+Moment = Callable[[str], None]
+
+
 class _Generator:
     def __init__(self, project: Project) -> None:
         self.plan = project.tracking_plan
         self.sim = project.simulation
+        self.market = self.sim.market
         self.behavior = self.sim.behavior
         self.rng = random.Random(self.sim.seed)
-        catalog = self.sim.catalog
-        self.catalog: list[Product] = [
-            (f"p{i:03d}", float(round(self.rng.uniform(catalog.price_min, catalog.price_max))))
-            for i in range(1, catalog.size + 1)
-        ]
         self.start = datetime.combine(self.sim.start_date, datetime.min.time())
+        self.end = self.start + timedelta(days=self.sim.days)
+        self.products = self._make_products()
+        self.categories = sorted({p.category for p in self.products})
         # 埋點用的亂數和行為用的亂數分開：換 tracking plan 不會改變使用者的行為
         self.fake_rng = random.Random(self.sim.seed + 1)
+        self.stock = {p.id: p.initial_stock for p in self.products}
+        self.order_lines: list[dict[str, Any]] = []
+        self.inventory: list[dict[str, Any]] = []
+        self.impressions = {p.id: 0 for p in self.products}
+        self._snapshot_day = 0
 
-    def run(self) -> list[dict[str, Any]]:
+    # ---------- 商品 ----------
+
+    def _make_products(self) -> list[ProductTruth]:
+        rng, catalog, market = self.rng, self.sim.catalog, self.market
+        n = catalog.size
+        legacy = list(range(1, n + 1))
+        rng.shuffle(legacy)
+        new_products = set(rng.sample(range(n), k=max(1, n // 12)))  # 期間中才上架的新品
+        rising = set(rng.sample(range(n), k=round(n * market.rising_share)))
+        products = []
+        for i in range(n):
+            noun, category = _NOUNS[i % len(_NOUNS)]
+            price = float(round(rng.uniform(catalog.price_min, catalog.price_max)))
+            launch_day = rng.randint(3, max(3, self.sim.days - 7)) if i in new_products else 0
+            products.append(ProductTruth(
+                id=f"p{i + 1:03d}",
+                name=f"{_ADJECTIVES[(i // len(_NOUNS)) % len(_ADJECTIVES)]}{noun}",
+                category=category,
+                price=price,
+                cost=float(round(price * rng.uniform(*catalog.cost_ratio))),
+                launch_day=launch_day,
+                # 新品還沒被推，排在舊排序最後面
+                legacy_rank=legacy[i] + (n if launch_day else 0),
+                attractiveness=_lognormal(rng, market.attractiveness_sigma),
+                conversion=_lognormal(rng, market.conversion_sigma),
+                rising=i in rising,
+                initial_stock=rng.randint(*market.initial_stock),
+            ))
+        return products
+
+    def available(self, day: int) -> list[ProductTruth]:
+        return sorted((p for p in self.products if p.launch_day <= day), key=lambda p: p.legacy_rank)
+
+    def featured(self, day: int) -> list[ProductTruth]:
+        return self.available(day)[: self.market.featured_slots]
+
+    def category_list(self, category: str, day: int) -> list[ProductTruth]:
+        return [p for p in self.available(day) if p.category == category]
+
+    # ---------- 庫存（依時間推進）----------
+
+    def _advance_inventory(self, day: int) -> None:
+        """記下每天結束時的庫存快照並定期補貨，直到 day 的前一天。"""
+        while self._snapshot_day < day:
+            snapshot_date = (self.start + timedelta(days=self._snapshot_day)).date().isoformat()
+            for p in self.products:
+                if p.launch_day <= self._snapshot_day:
+                    self.inventory.append({"date": snapshot_date, "product_id": p.id, "on_hand": self.stock[p.id]})
+            self._snapshot_day += 1
+            if self._snapshot_day % self.market.restock_days == 0:
+                for p in self.products:
+                    self.stock[p.id] = max(self.stock[p.id], p.initial_stock)
+
+    # ---------- 主流程 ----------
+
+    def run(self) -> World:
+        rng = self.rng
         names = list(self.sim.personas)
         weights = [p.weight for p in self.sim.personas.values()]
-        events: list[dict[str, Any]] = []
+        queue: list[tuple[datetime, int, int]] = []
+        visitors: list[_Visitor] = []
+        seq = 0
         for i in range(self.sim.visitors):
-            persona = self.sim.personas[self.rng.choices(names, weights)[0]]
-            events += self._visitor(i, persona)
+            persona = self.sim.personas[rng.choices(names, weights)[0]]
+            visitors.append(_Visitor(
+                persona=persona,
+                user_id=f"u{i:05d}" if rng.random() < persona.has_account_rate else None,
+                anonymous_ids={p: f"anon-{rng.getrandbits(40):010x}" for p in persona.platforms},
+            ))
+            for _ in range(_poisson(rng, persona.sessions_per_week * self.sim.days / 7)):
+                seq += 1
+                heapq.heappush(queue, (self._session_start(), seq, i))
+
+        # 依時間先後處理所有 session：庫存要照真實順序扣
+        events: list[dict[str, Any]] = []
+        while queue:
+            start, _, i = heapq.heappop(queue)
+            visitor = visitors[i]
+            if start >= self.end:
+                continue
+            # 同一個人一次只會有一個 session；前一個還沒結束就往後延
+            if visitor.last_end is not None and start <= visitor.last_end:
+                seq += 1
+                heapq.heappush(queue, (visitor.last_end + timedelta(minutes=rng.randint(1, 30)), seq, i))
+                continue
+            self._advance_inventory((start - self.start).days)
+            session, visitor.last_end = self._session(visitor, start)
+            events += session
+        self._advance_inventory(self.sim.days)
+
         # 觀察期在最後一天午夜結束（像資料快照）：跨過午夜的 session 只留下之前的部分
-        end = (self.start + timedelta(days=self.sim.days)).isoformat(sep=" ")
+        end = self.end.isoformat(sep=" ")
         events = [e for e in events if e["timestamp"] < end]
         events.sort(key=lambda e: (e["timestamp"], e["event_id"]))
-        return events
-
-    def _visitor(self, index: int, persona: Persona) -> list[dict[str, Any]]:
-        rng = self.rng
-        user_id = f"u{index:05d}" if rng.random() < persona.has_account_rate else None
-        anonymous_ids = {p: f"anon-{rng.getrandbits(40):010x}" for p in persona.platforms}
-        logged_in: set[str] = set()  # 已登入過的裝置會保持登入
-        n_sessions = _poisson(rng, persona.sessions_per_week * self.sim.days / 7)
-        starts = sorted(self._session_start() for _ in range(n_sessions))
-        events: list[dict[str, Any]] = []
-        last_end: datetime | None = None
-        for start in starts:
-            # 同一個人一次只會有一個 session；前一個還沒結束就往後延
-            if last_end is not None and start <= last_end:
-                start = last_end + timedelta(minutes=rng.randint(1, 30))
-            platform = rng.choice(persona.platforms)
-            session, last_end = self._session(persona, start, platform, anonymous_ids[platform], user_id, logged_in)
-            events += session
-        return events
+        lines = [r for r in self.order_lines if r["ordered_at"] < end]
+        lines.sort(key=lambda r: (r["ordered_at"], r["order_id"], r["line_no"]))
+        return World(
+            events=events,
+            tables={"products": self.product_rows(), "order_lines": lines, "inventory_daily": self.inventory},
+            truth=self._truth(),
+        )
 
     def _session_start(self) -> datetime:
         rng = self.rng
@@ -137,68 +282,110 @@ class _Generator:
             seconds=rng.randrange(60),
         )
 
-    def _session(
-        self,
-        persona: Persona,
-        start: datetime,
-        platform: str,
-        anonymous_id: str,
-        user_id: str | None,
-        logged_in: set[str],
-    ) -> tuple[list[dict[str, Any]], datetime]:
+    def _session(self, visitor: _Visitor, start: datetime) -> tuple[list[dict[str, Any]], datetime]:
         """回傳 (事件, session 結束時間)。"""
         rng, sim = self.rng, self.sim
+        persona = visitor.persona
+        platform = rng.choice(persona.platforms)
+        anonymous_id = visitor.anonymous_ids[platform]
         ctx = Context(platform)
-        current_user = user_id if platform in logged_in else None
-        clock = start
+        user: list[str | None] = [visitor.user_id if platform in visitor.logged_in else None]
+        clock = [start]
         out: list[dict[str, Any]] = []
 
         def moment(name: str) -> None:
             """行為時刻：送出 L1 裡 fires_on 這個時刻的所有事件，然後時間往前走。"""
-            nonlocal clock
             for event_name in self.plan.events_on(name):
                 out.append({
                     "event_id": f"{self.fake_rng.getrandbits(64):016x}",
                     "event_name": event_name,
-                    "timestamp": clock.isoformat(sep=" "),
+                    "timestamp": clock[0].isoformat(sep=" "),
                     "anonymous_id": anonymous_id,
-                    "user_id": current_user,
+                    "user_id": user[0],
                     "tracking_plan_version": self.plan.version,
                     "properties": self._properties(event_name, ctx),
                 })
-            clock += timedelta(seconds=rng.randint(5, 120))
+            if name != "product_impression":  # 同一個畫面上的曝光是同時發生的
+                clock[0] += timedelta(seconds=rng.randint(5, 120))
+
+        def backend_order() -> None:
+            """後端建立訂單：寫入訂單明細、扣庫存。和前端埋點無關。"""
+            for line_no, (product, qty) in enumerate(ctx.cart, start=1):
+                self.order_lines.append({
+                    "order_id": ctx.order_id,
+                    "line_no": line_no,
+                    "product_id": product.id,
+                    "quantity": qty,
+                    "unit_price": product.price,
+                    "line_revenue": product.price * qty,
+                    "coupon_code": ctx.coupon_code,
+                    "ordered_at": clock[0].isoformat(sep=" "),
+                    "anonymous_id": anonymous_id,
+                    "user_id": user[0],
+                })
+                self.stock[product.id] = max(0, self.stock[product.id] - qty)
 
         for index, step in enumerate(sim.funnel):
             if index > 0 and rng.random() >= persona.continue_.get(step.action, 1.0):
+                if step.optional:
+                    continue
                 break
             if step.action in ("checkout", "purchase") and not ctx.cart:
-                break  # 加入購物車全部失敗：沒有東西可以結帳
+                break  # 沒有東西可以結帳
             for _ in range(rng.randint(*step.repeat)):
-                self._act(step.action, ctx, moment)
-            if index == 0 and sim.login and user_id and current_user is None and rng.random() < sim.login.rate_per_session:
-                current_user = user_id
-                logged_in.add(platform)
+                self._act(step.action, ctx, moment, backend_order, clock[0])
+            if index == 0 and sim.login and visitor.user_id and user[0] is None \
+                    and rng.random() < sim.login.rate_per_session:
+                user[0] = visitor.user_id
+                visitor.logged_in.add(platform)
                 ctx.login_method = rng.choice(sim.login.methods)
                 moment("login_success")
-        return out, clock
+        return out, clock[0]
 
-    def _act(self, action: str, ctx: Context, moment: Any) -> None:
-        rng, behavior = self.rng, self.behavior
+    def _show_list(self, ctx: Context, list_name: str, products: list[ProductTruth], moment: Moment) -> None:
+        for position, product in enumerate(products, start=1):
+            ctx.product, ctx.list_name, ctx.list_position = product, list_name, position
+            ctx.seen.append((product, position))
+            self.impressions[product.id] += 1
+            moment("product_impression")
+        ctx.product = ctx.list_name = ctx.list_position = None
+
+    def _act(self, action: str, ctx: Context, moment: Moment, backend_order: Callable[[], None], clock: datetime) -> None:
+        rng, behavior, market = self.rng, self.behavior, self.market
+        day = (clock - self.start).total_seconds() / 86400
+        today = int(day)
         if action == "view_home":
             ctx.page_type, ctx.product = "home", None
             moment("page_load")
+            self._show_list(ctx, "home_featured", self.featured(today), moment)
+        elif action == "browse_category":
+            category = rng.choice(self.categories)
+            ctx.page_type, ctx.product = "category", None
+            moment("page_load")
+            depth = rng.randint(*market.list_depth)
+            self._show_list(ctx, "category", self.category_list(category, today)[:depth], moment)
         elif action == "view_product":
-            ctx.page_type, ctx.product, ctx.quantity = "product", rng.choice(self.catalog), None
-            ctx.viewed.append(ctx.product)
+            # 點哪個商品：看過的卡片裡依真實吸引力與位置；沒看過任何卡片就從全部商品挑
+            candidates = ctx.seen or [(p, 1) for p in self.available(today)]
+            weights = [p.attract_at(day, self.sim.days, market.rising_growth) * market.position_decay ** (pos - 1)
+                       for p, pos in candidates]
+            product = rng.choices([p for p, _ in candidates], weights)[0]
+            ctx.page_type, ctx.product, ctx.quantity = "product", product, None
+            ctx.viewed.append(product)
             moment("page_load")
             moment("product_detail_load")
         elif action == "add_to_cart":
-            ctx.product = rng.choice(ctx.viewed or self.catalog)
-            ctx.quantity = rng.randint(1, 3)
-            moment("add_to_cart_click")
-            if rng.random() < behavior.add_to_cart_api_success:
-                ctx.cart.append((ctx.product, ctx.quantity))
-                moment("add_to_cart_success")
+            # 每個看過的商品，依它真實的轉換傾向決定要不要加購
+            for product in dict.fromkeys(ctx.viewed):
+                if rng.random() >= min(0.95, market.add_to_cart_base * product.conversion):
+                    continue
+                ctx.product, ctx.quantity = product, rng.randint(1, 3)
+                moment("add_to_cart_click")
+                in_cart = sum(q for p, q in ctx.cart if p is product)
+                in_stock = self.stock[product.id] - in_cart >= ctx.quantity
+                if in_stock and rng.random() < behavior.add_to_cart_api_success:
+                    ctx.cart.append((product, ctx.quantity))
+                    moment("add_to_cart_success")
         elif action == "checkout":
             ctx.page_type, ctx.product = "checkout", None
             moment("page_load")
@@ -206,6 +393,7 @@ class _Generator:
         elif action == "purchase":
             ctx.order_id = f"o{rng.getrandbits(40):010x}"
             ctx.coupon_code = rng.choice(behavior.coupon_codes) if rng.random() < behavior.coupon_rate else None
+            backend_order()
             moment("payment_success")
             if rng.random() < behavior.complete_page_reached:
                 moment("order_complete_page_load")
@@ -221,12 +409,59 @@ class _Generator:
                 props[name] = value
         return props
 
+    # ---------- 輸出 ----------
 
-def product_catalog(project: Project) -> list[Product]:
-    """和合成事件用的是同一份商品（同一個 seed），demo 商店也用它。"""
-    return _Generator(project).catalog
+    def product_rows(self) -> list[dict[str, Any]]:
+        """商品目錄（業務資料）：公開的屬性，不含真相。"""
+        first_day = self.start.date()
+        return [
+            {
+                "product_id": p.id,
+                "name": p.name,
+                "category": p.category,
+                "price": p.price,
+                "cost": p.cost,
+                "launch_date": (first_day + timedelta(days=p.launch_day)).isoformat()
+                if p.launch_day else (first_day - timedelta(days=30 + p.legacy_rank * 3)).isoformat(),
+                "legacy_rank": p.legacy_rank,
+            }
+            for p in self.products
+        ]
+
+    def _truth(self) -> list[dict[str, Any]]:
+        """真正的潛力商品：轉換傾向在前 25%，但實際曝光在後 50%。"""
+        n = len(self.products)
+        by_conversion = sorted(self.products, key=lambda p: p.conversion, reverse=True)
+        top_conversion = {p.id for p in by_conversion[: max(1, n // 4)]}
+        by_exposure = sorted(self.products, key=lambda p: (self.impressions[p.id], p.id))
+        low_exposure = {p.id for p in by_exposure[: n // 2]}
+        return [
+            {
+                "product_id": p.id,
+                "attractiveness": round(p.attractiveness, 4),
+                "conversion": round(p.conversion, 4),
+                "rising": p.rising,
+                "launch_day": p.launch_day,
+                "legacy_rank": p.legacy_rank,
+                "impressions": self.impressions[p.id],
+                "is_potential": p.id in top_conversion and p.id in low_exposure,
+            }
+            for p in self.products
+        ]
+
+
+def catalog(project: Project) -> tuple[list[dict[str, Any]], list[str]]:
+    """商品目錄與首頁精選（不跑模擬，所以很快）；demo 商店和模擬器看到的是同一份。"""
+    generator = _Generator(project)
+    featured = [p.id for p in generator.featured(generator.sim.days)]
+    return generator.product_rows(), featured
+
+
+def simulate(project: Project) -> World:
+    """依 simulation.seed 產生確定性的模擬世界。"""
+    return _Generator(project).run()
 
 
 def generate_events(project: Project) -> list[dict[str, Any]]:
-    """依 simulation.seed 產生確定性的合成事件，依時間排序。"""
-    return _Generator(project).run()
+    """只要前端事件時用。"""
+    return simulate(project).events

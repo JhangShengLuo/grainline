@@ -43,6 +43,8 @@ interface Explanation {
     summary: string;
     candidates: number;
     index: number;
+    rows?: Record<string, unknown>[];
+    rows_source?: string;
     events: { time: string; event_name: string; platform: string; session: string; properties: Record<string, unknown>; marks: string[] }[];
   } | null;
 }
@@ -155,6 +157,23 @@ export function MetricDetailPage() {
             </button>
           </div>
           <p className="evidence">{data.example.summary}</p>
+          {data.example.rows && data.example.rows.length > 0 && (
+            <>
+              <p className="small">
+                這個指標來自後端的業務資料 <code>{data.example.rows_source}</code>，不是前端事件。這個人在這段期間的資料列：
+              </p>
+              <div className="table-scroll">
+                <table className="data compact">
+                  <thead><tr>{Object.keys(data.example.rows[0]).map((k) => <th key={k}>{k}</th>)}</tr></thead>
+                  <tbody>
+                    {data.example.rows.map((r, i) => (
+                      <tr key={i}>{Object.values(r).map((v, j) => <td key={j}>{String(v ?? "—")}</td>)}</tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
           <p className="muted small">
             這是模擬使用者 <code>{data.example.person_id}</code> 在{data.example.grain === "week" ? ` ${data.example.period} 這一週` : ` ${data.example.period}`}被記錄下來的所有事件。標示的列會被算進這個指標。
           </p>

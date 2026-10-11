@@ -114,6 +114,34 @@ metrics:
     numerator: buyers
     denominator: web_uv
 
+  impressions:
+    label: 商品曝光數
+    model: fct_product_impressions
+    time_column: ts
+    measure: {agg: count}
+    additivity: additive
+
+  units_sold:
+    label: 銷售件數（後端）
+    model: fct_order_lines
+    time_column: ordered_at
+    measure: {agg: sum, column: quantity}
+    additivity: additive
+
+  backend_orders:
+    label: 訂單數（後端）
+    model: fct_order_lines
+    time_column: ordered_at
+    measure: {agg: count_distinct, column: order_id}
+    additivity: non_additive
+
+  line_revenue:
+    label: 營收（後端）
+    model: fct_order_lines
+    time_column: ordered_at
+    measure: {agg: sum, column: line_revenue}
+    additivity: additive
+
 reports:
   daily_overview:
     label: 每日總覽
@@ -136,3 +164,8 @@ reports:
     time_grain: week
     dimensions: [coupon_code]
     metrics: [orders, revenue]
+
+  frontend_vs_backend:
+    label: 前端事件 vs 後端資料
+    time_grain: day
+    metrics: [orders, backend_orders, revenue, line_revenue]

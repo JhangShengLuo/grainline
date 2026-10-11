@@ -1,0 +1,45 @@
+# L1 業務資料來源 — 不是前端事件，由各系統的擁有者提供
+#
+# 和前端事件一樣是合約：宣告 grain（一列代表什麼）、欄位型別、擁有者。
+# 銷量、營收、成本、庫存的真實來源都在這裡，不該從前端事件推算。
+# identity：哪些欄位可以對到前端的人；有的話 L2 會用同一套身分規則加上 person_id。
+# 欄位型別：string / integer / number / boolean / timestamp / date
+
+products:
+  owner: 商品／營運
+  description: 商品目錄，每個商品一列
+  grain: [product_id]
+  columns:
+    product_id: {type: string, description: 商品編號}
+    name: {type: string, description: 商品名稱}
+    category: {type: string, description: 商品分類}
+    price: {type: number, description: 售價（新台幣）}
+    cost: {type: number, description: 成本（新台幣）}
+    launch_date: {type: date, description: 上架日}
+    legacy_rank: {type: integer, description: 目前的陳列排序（首頁精選與分類頁順序依此）}
+
+order_lines:
+  owner: 後端
+  description: 訂單明細，每張訂單的每個商品一列（以後端建立訂單為準）
+  grain: [order_id, line_no]
+  identity: {anonymous_id: anonymous_id, user_id: user_id}
+  columns:
+    order_id: {type: string, description: 訂單編號}
+    line_no: {type: integer, description: 第幾個品項}
+    product_id: {type: string, description: 商品編號}
+    quantity: {type: integer, description: 數量}
+    unit_price: {type: number, description: 單價}
+    line_revenue: {type: number, description: 品項金額（單價 × 數量，未扣折扣）}
+    coupon_code: {type: string, description: 折扣碼}
+    ordered_at: {type: timestamp, description: 訂單建立時間}
+    anonymous_id: {type: string, description: 下單裝置（結帳時由前端帶給後端）}
+    user_id: {type: string, description: 會員帳號}
+
+inventory_daily:
+  owner: 倉儲
+  description: 每天結束時的庫存，每個商品每天一列
+  grain: [date, product_id]
+  columns:
+    date: {type: date, description: 日期}
+    product_id: {type: string, description: 商品編號}
+    on_hand: {type: integer, description: 可售庫存}

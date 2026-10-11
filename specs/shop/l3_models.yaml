@@ -1,6 +1,7 @@
 # L3 實體與事實模型 — 擁有者：DE
 #
-# kind: fact    一列對應一個來源事件，欄位只能直接取用（from），不能聚合
+# source：L1 事件（"*" 代表全部事件）；table：L1 業務資料來源（l1_sources.yaml）——兩者擇一
+# kind: fact    一列對應一個來源事件（或業務資料的一列），欄位只能直接取用（from），不能聚合
 # kind: entity  依 grain 分組，非 grain 欄位要宣告 agg
 # grain 宣告「一列代表什麼」，是 L4 可加性檢查的依據
 # from 只能引用來源 stg view 的欄位，這樣每個欄位都能追溯回 L1（血緣可達）
@@ -88,3 +89,57 @@ dim_persons:
     last_seen_at: {from: timestamp, agg: max}
     session_count: {from: session_id, agg: count_distinct}
     event_count: {agg: count}
+
+fct_product_impressions:
+  kind: fact
+  description: 每次商品曝光一列
+  source: product_impression
+  grain: [event_id]
+  columns:
+    event_id: {from: event_id}
+    ts: {from: timestamp}
+    person_id: {from: person_id}
+    session_id: {from: session_id}
+    platform: {from: platform}
+    product_id: {from: product_id}
+    list_name: {from: list_name}
+    position: {from: position}
+
+fct_order_lines:
+  kind: fact
+  description: 每個訂單品項一列（後端資料）
+  table: order_lines
+  grain: [order_id, line_no]
+  columns:
+    order_id: {from: order_id}
+    line_no: {from: line_no}
+    product_id: {from: product_id}
+    quantity: {from: quantity}
+    line_revenue: {from: line_revenue}
+    coupon_code: {from: coupon_code}
+    ordered_at: {from: ordered_at}
+    person_id: {from: person_id}
+
+dim_products:
+  kind: fact
+  description: 每個商品一列（商品目錄）
+  table: products
+  grain: [product_id]
+  columns:
+    product_id: {from: product_id}
+    name: {from: name}
+    category: {from: category}
+    price: {from: price}
+    cost: {from: cost}
+    launch_date: {from: launch_date}
+    legacy_rank: {from: legacy_rank}
+
+fct_inventory_daily:
+  kind: fact
+  description: 每個商品每天的庫存一列
+  table: inventory_daily
+  grain: [date, product_id]
+  columns:
+    date: {from: date}
+    product_id: {from: product_id}
+    on_hand: {from: on_hand}

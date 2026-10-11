@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from .spec import Filter, Model, Project, RatioMetric, RollupMetric, SimpleMetric
 
-FieldType = Literal["string", "integer", "number", "boolean", "timestamp"]
+FieldType = Literal["string", "integer", "number", "boolean", "timestamp", "date"]
 NUMERIC: set[str] = {"integer", "number"}
 DUCK_TYPES = {"string": "VARCHAR", "integer": "BIGINT", "number": "DOUBLE", "boolean": "BOOLEAN"}
 
@@ -81,7 +81,32 @@ class Lineage:
 
 
 def source_view(model: Model) -> str:
+    if model.table is not None:
+        return f"stg_src_{model.table}"
     return "stg_events" if model.source == "*" else f"stg_{model.source}"
+
+
+def source_label(model: Model) -> str:
+    """model 的來源，給人看的說法。"""
+    if model.table is not None:
+        return f"業務資料 {model.table}"
+    return "所有事件" if model.source == "*" else f"{model.source} 事件"
+
+
+def table_fields(project: Project, table: str) -> dict[str, SourceField]:
+    """業務資料來源的 stg view 欄位：直接取用，追到 L1 業務資料合約（含擁有者）。"""
+    source = project.sources[table]
+    view = f"stg_src_{table}"
+    fields: dict[str, SourceField] = {
+        name: SourceField(
+            col.type,  # type: ignore[arg-type]
+            (Hop("L2", f"{view}.{name}", "直接取用"), Hop("L1", f"{table}.{name}", f"{col.type}（業務資料，擁有者：{source.owner}）")),
+        )
+        for name, col in source.columns.items()
+    }
+    if source.identity:
+        fields["person_id"] = SourceField("string", (Hop("L2", f"{view}.person_id", "L2 身分合併產生"),))
+    return fields
 
 
 def stg_fields(project: Project, source: str) -> dict[str, SourceField]:
@@ -154,7 +179,7 @@ class _Resolver:
     def _model(self, name: str, model: Model) -> None:
         view = source_view(model)
         plan = self.project.tracking_plan
-        if model.source != "*" and model.source not in plan.events:
+        if model.source is not None and model.source != "*" and model.source not in plan.events:
             hops = (Hop("L3", name, f"source {model.source}"), Hop("L1", model.source, "✗ 事件不存在"))
             problem = Problem(
                 "missing_event",
@@ -168,8 +193,12 @@ class _Resolver:
             self.broken_models[name] = problem.message
             self._model_problems[name] = [problem]
             return
-        fields = stg_fields(self.project, model.source)
-        event_desc = "L1 共用 property" if model.source == "*" else f"L1 事件 {model.source}"
+        if model.table is not None:
+            fields = table_fields(self.project, model.table)
+            event_desc = f"L1 業務資料 {model.table}"
+        else:
+            fields = stg_fields(self.project, model.source or "*")
+            event_desc = "L1 共用 property" if model.source == "*" else f"L1 事件 {model.source}"
         columns: dict[str, ColumnInfo] = {}
         for col, c in model.columns.items():
             l3 = Hop("L3", f"{name}.{col}", f"{c.agg}({c.from_ or '*'})" if c.agg else f"from {c.from_}")
@@ -182,9 +211,10 @@ class _Resolver:
                 problem = Problem(
                     "missing_property",
                     f"{name}.{col}",
-                    f"L3 {name}.{col} 引用 '{c.from_}'，但 {reason}：前端沒有埋這個欄位",
+                    f"L3 {name}.{col} 引用 '{c.from_}'，但 {reason}"
+                    + ("：前端沒有埋這個欄位" if model.table is None else f"：{self.project.sources[model.table].owner}沒有提供這個欄位"),
                     hops,
-                    details={"event": model.source, "property": c.from_},
+                    details={"event": model.source, "table": model.table, "property": c.from_},
                 )
                 self.problems.append(problem)
                 self._column_problem[(name, col)] = problem

@@ -17,11 +17,12 @@ from .checks import Finding, effective_additivity, metric_format
 from .compiler import View, filter_sql, measure_sql, metric_sql
 from .diff import metric_events
 from .ingest import IncomingEvent, plan_warnings
-from .lineage import Lineage, underlying_simple
+from .lineage import Lineage, source_label, underlying_simple
 from .spec import Filter, Project, RatioMetric, RollupMetric, SimpleMetric, Staging
 
 MOMENT_TEXT = {
     "page_load": "頁面載入完成時",
+    "product_impression": "商品卡片出現在畫面上時",
     "product_detail_load": "商品詳情載入完成時",
     "add_to_cart_click": "按下「加入購物車」的當下",
     "add_to_cart_success": "購物車 API 回傳成功後",
@@ -82,6 +83,9 @@ def _field_text(project: Project, model_name: str, column: str) -> str:
     fixed = {"person_id": "人", "session_id": "造訪", "timestamp": "時間", "event_id": "事件"}
     if source in fixed:
         return fixed[source]
+    if model.table is not None:
+        col = project.sources[model.table].columns.get(source)
+        return col.description if col and col.description else column
     plan = project.tracking_plan
     props = plan.common_properties if model.source == "*" else (
         plan.properties_of(model.source) if model.source in plan.events else {}
@@ -126,10 +130,9 @@ def metric_summary(project: Project, name: str) -> str:
     if isinstance(metric, RollupMetric):
         verb = {"sum": "加總", "avg": "平均", "min": "取最小", "max": "取最大"}[metric.agg]
         return f"把{GRAIN_TEXT[metric.from_grain]}的{labels[metric.of].label}{verb}"
-    source = project.models[metric.model].source
-    origin = "所有事件" if source == "*" else f" {source} 事件"
+    origin = source_label(project.models[metric.model])
     filters = _filters_text(project, metric)
-    return f"{_measure_text(project, metric)}{'（' + filters + '）' if filters else ''}，來自{origin}"
+    return f"{_measure_text(project, metric)}{'（' + filters + '）' if filters else ''}，來自 {origin}"
 
 
 def _simple_steps(project: Project, lineage: Lineage, name: str) -> list[dict[str, Any]]:
@@ -139,7 +142,11 @@ def _simple_steps(project: Project, lineage: Lineage, name: str) -> list[dict[st
     plan, staging = project.tracking_plan, project.staging
     steps: list[dict[str, Any]] = []
 
-    if model.source == "*":
+    if model.table is not None:
+        source = project.sources[model.table]
+        steps.append({"layer": "L1", "title": "記錄",
+                      "text": f"{source.owner}提供業務資料 {model.table}（{source.description}）。這是後端資料，不受前端埋點設計影響。"})
+    elif model.source == "*":
         steps.append({"layer": "L1", "title": "記錄", "text": "所有被記錄的事件都會用到，不論是哪一種。"})
     elif model.source not in plan.events:
         steps.append({"layer": "L1", "title": "記錄", "broken": True,
@@ -246,6 +253,8 @@ def _counted_ids(con: duckdb.DuckDBPyConnection, project: Project, metric: Simpl
     model = project.models[metric.model]
     if model.source == "*":
         return None
+    if model.table is not None:
+        return set()  # 業務資料不是前端事件，例子另外列出資料列
     mapped = [
         Filter(column=model.columns[f.column].from_, op=f.op, value=f.value)
         for f in metric.filters
@@ -358,8 +367,17 @@ def _example(project: Project, lineage: Lineage, con: duckdb.DuckDBPyConnection,
             grain = "、".join(project.models[metric.model].grain)
             summary += f" ⚠ 其中 {dup} 筆是同一個 {grain} 被重複記錄，實際上不該算。"
         summary += f" 這一天全站的{metric.label}是 {_fmt(total, metric_format(project, name))}。"
-        return {"person_id": person, "period": str(day), "grain": "day", "events": events,
-                "summary": summary, "candidates": len(people), "index": index % len(people)}
+        example = {"person_id": person, "period": str(day), "grain": "day", "events": events,
+                   "summary": summary, "candidates": len(people), "index": index % len(people)}
+        if project.models[metric.model].table is not None:
+            example["rows"] = [
+                {k: (str(v) if not isinstance(v, int | float | str | type(None)) else v) for k, v in r.items()}
+                for r in _rows(con, f"select * exclude (person_id) from {metric.model} where person_id = ? "
+                                    f"and cast({metric.time_column} as date) = ?{_conditions(metric)} limit 20",
+                               [person, day])
+            ]
+            example["rows_source"] = project.models[metric.model].table
+        return example
 
     if isinstance(metric, RatioMetric):
         num, den = metrics[metric.numerator], metrics[metric.denominator]
@@ -598,6 +616,7 @@ def model_catalog(project: Project, lineage: Lineage, findings: list[Finding], v
             "kind": model.kind,
             "description": model.description,
             "source": model.source,
+            "table": model.table,
             "grain": model.grain,
             "rows": rows,
             "broken": broken,
@@ -609,7 +628,25 @@ def model_catalog(project: Project, lineage: Lineage, findings: list[Finding], v
             "metrics": [m for m, metric in metrics.items() if isinstance(metric, SimpleMetric) and metric.model == name],
             "sql": sql.get(name),
         })
+    sources = []
+    for name, source in project.sources.items():
+        (rows,) = con.execute(f"select count(*) from src_{name}").fetchone()
+        grain = grain_findings.get(f"source:{name}")
+        sources.append({
+            "name": name,
+            "owner": source.owner,
+            "description": source.description,
+            "grain": source.grain,
+            "rows": rows,
+            "columns": [{"name": c, "type": col.type, "description": col.description} for c, col in source.columns.items()],
+            "identity": source.identity.model_dump() if source.identity else None,
+            "grain_check": {
+                "ok": grain is None,
+                "summary": grain.evidence["summary"] if grain and grain.evidence else "grain 在資料上成立：沒有重複。",
+            },
+        })
     return {
+        "sources": sources,
         "staging": {
             "session_timeout_minutes": staging.session_timeout_minutes,
             "identity": staging.identity,

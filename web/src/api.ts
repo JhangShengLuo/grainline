@@ -3,6 +3,11 @@ export interface Product {
   name: string;
   category: string;
   price: number;
+  launch_date: string;
+  /** 首頁精選的位置（1 起算）；不在精選裡是 null */
+  featured_rank: number | null;
+  /** 目前的陳列排序：分類頁依這個順序 */
+  legacy_rank: number;
 }
 
 /** GET /events/live：demo 商店送出的事件，以及 L2 怎麼解析它 */

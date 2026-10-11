@@ -26,7 +26,7 @@ from .checks import Finding, check_project, effective_additivity, metric_format
 from .compiler import compile_project
 from .diff import compare
 from .explain import event_catalog, explain_metric, metric_list, model_catalog
-from .generator import generate_events
+from .generator import World, simulate
 from .ingest import IngestBatch, IncomingEvent, LiveStore, plan_warnings
 from .lineage import Lineage, metric_lineage, resolve
 from .spec import Project, default_plan_version, load_project, read_tracking_plans
@@ -43,6 +43,7 @@ class State:
     lineage: Lineage
     con: duckdb.DuckDBPyConnection
     events: int
+    world: World
     built_at: datetime = field(default_factory=datetime.now)
     _findings: list[Finding] | None = None
 
@@ -109,12 +110,12 @@ class Workspace:
                 raise _spec_error(exc) from exc
             lineage = resolve(project)
             con = duckdb.connect(":memory:")
-            events = generate_events(project)
-            build_warehouse(con, project, events, lineage)
+            world = simulate(project)
+            build_warehouse(con, project, world, lineage)
             if include_live:
                 live = [e for e in self.live.read_all() if e["tracking_plan_version"] == version]
                 load_events(con, live, source="live")
-            self._states[key] = State(project, lineage, con, len(events))
+            self._states[key] = State(project, lineage, con, len(world.events), world)
         return self._states[key]
 
     def built(self, version: int) -> State | None:

@@ -1,9 +1,9 @@
 from collections import Counter, defaultdict
 
 from app.generator import generate_events
-from app.spec import Project, load_project
+from app.spec import Project
 
-from .conftest import SHOP_SPECS
+from .conftest import load_small
 
 PY_TYPES = {"string": str, "integer": int, "number": (int, float), "boolean": bool}
 
@@ -58,14 +58,14 @@ def test_order_revenue_matches_checkout_cart_value(project: Project) -> None:
 
 
 def test_v2_optional_properties_follow_context() -> None:
-    v2 = load_project(SHOP_SPECS, 2)
+    v2 = load_small(2)
     for e in generate_events(v2):
         if e["event_name"] == "page_view":
             assert ("product_id" in e["properties"]) == (e["properties"]["page_type"] == "product")
 
 
 def test_v2_records_the_same_behavior_differently(project: Project) -> None:
-    v2 = load_project(SHOP_SPECS, 2)
+    v2 = load_small(2)
     counts = {
         version: Counter(e["event_name"] for e in generate_events(p))
         for version, p in ((1, project), (2, v2))

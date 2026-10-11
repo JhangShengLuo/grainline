@@ -15,7 +15,7 @@ import duckdb
 
 from .checks import check_project
 from .compiler import compile_project
-from .generator import generate_events
+from .generator import simulate
 from .lineage import resolve
 from .spec import load_project
 from .warehouse import build_warehouse
@@ -33,12 +33,13 @@ def _compile(specs: Path, plan: int | None) -> None:
 def _build(specs: Path, db: Path, plan: int | None) -> None:
     started = time.perf_counter()
     project = load_project(specs, plan)
-    events = generate_events(project)
+    world = simulate(project)
+    events = world.events
     db.parent.mkdir(parents=True, exist_ok=True)
     db.unlink(missing_ok=True)
     lineage = resolve(project)
     with duckdb.connect(str(db)) as con:
-        views = build_warehouse(con, project, events, lineage)
+        views = build_warehouse(con, project, world, lineage)
         print(f"tracking plan v{project.tracking_plan.version}，raw_events: {len(events):,} 筆合成事件 → {db}")
         for view in views:
             if view.name == "stg_identity":
@@ -58,7 +59,7 @@ def _check(specs: Path, plan: int | None) -> int:
     project = load_project(specs, plan)
     lineage = resolve(project)
     with duckdb.connect(":memory:") as con:
-        build_warehouse(con, project, generate_events(project), lineage)
+        build_warehouse(con, project, simulate(project), lineage)
         findings = check_project(project, lineage, con)
     for f in findings:
         print(f"[{f.rule} {f.severity}] {f.subject}\n  {f.message}")

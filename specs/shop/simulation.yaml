@@ -4,11 +4,13 @@
 # 再由 tracking plan 的 fires_on 決定送出哪些事件。所以同樣的行為，換一份 tracking plan 會得到不同的事件。
 #
 # 行為與它產生的時刻：
-#   view_home     → page_load(home)
-#   view_product  → page_load(product)、product_detail_load
-#   add_to_cart   → add_to_cart_click，API 成功的話再 add_to_cart_success
+#   view_home        → page_load(home)，首頁精選的每張卡片 product_impression
+#   browse_category  → page_load(category)，分類頁往下看到的每張卡片 product_impression
+#   view_product     → page_load(product)、product_detail_load（從看過的卡片裡，依真實吸引力與位置挑）
+#   add_to_cart   → 每個看過的商品依真實轉換傾向決定要不要加購：add_to_cart_click，
+#                   有庫存且 API 成功的話再 add_to_cart_success
 #   checkout      → page_load(checkout)、checkout_load
-#   purchase      → payment_success，到達成功頁的話 order_complete_page_load（可能重新整理再一次）
+#   purchase      → 後端寫入訂單明細、扣庫存；payment_success，到達成功頁的話 order_complete_page_load（可能重新整理再一次）
 # 有帳號的人在第一步之後可能登入 → login_success
 #
 # 每個 visitor 依 persona 權重抽樣；session 數 ~ Poisson(sessions_per_week × days / 7)
@@ -23,6 +25,21 @@ catalog:
   size: 60
   price_min: 199
   price_max: 4990
+  cost_ratio: [0.4, 0.7]
+
+# 市場的真相：每個商品有真實的吸引力、轉換傾向、趨勢、庫存；報表看不到，只用來評估選品準不準。
+# 首頁精選與分類頁排序依「舊排序」（products.legacy_rank），不看真實品質，所以有好商品被埋沒。
+market:
+  featured_slots: 8          # 首頁精選版位
+  list_depth: [6, 20]        # 使用者在分類頁往下看幾個商品
+  position_decay: 0.85       # 每往後一個位置，被點的機率乘上這個數
+  add_to_cart_base: 0.3      # 轉換傾向 1.0 的商品，看了之後加購的機率
+  attractiveness_sigma: 0.6
+  conversion_sigma: 0.6
+  rising_share: 0.1          # 10% 的商品人氣在這段期間上升
+  rising_growth: 1.0         # 上升的商品在期間結束時吸引力是兩倍
+  initial_stock: [30, 300]
+  restock_days: 7
 
 # 有帳號的人在每個 session 第一步之後，有這個機率登入；登入過的裝置會保持登入
 login:
@@ -39,10 +56,11 @@ behavior:
 
 funnel:
   - action: view_home
+  - action: browse_category
+    optional: true
   - action: view_product
     repeat: [1, 4]
   - action: add_to_cart
-    repeat: [1, 2]
   - action: checkout
   - action: purchase
 
@@ -52,16 +70,16 @@ personas:
     sessions_per_week: 1.0
     has_account_rate: 0.2
     platforms: [web]
-    continue: {view_product: 0.7, add_to_cart: 0.15, checkout: 0.3, purchase: 0.4}
+    continue: {browse_category: 0.5, view_product: 0.7, add_to_cart: 0.5, checkout: 0.3, purchase: 0.4}
   regular:
     weight: 0.3
     sessions_per_week: 2.5
     has_account_rate: 0.7
     platforms: [web, app]
-    continue: {view_product: 0.85, add_to_cart: 0.35, checkout: 0.6, purchase: 0.7}
+    continue: {browse_category: 0.6, view_product: 0.85, add_to_cart: 0.8, checkout: 0.6, purchase: 0.7}
   loyal_app:
     weight: 0.1
     sessions_per_week: 4.0
     has_account_rate: 1.0
     platforms: [app]
-    continue: {view_product: 0.9, add_to_cart: 0.5, checkout: 0.75, purchase: 0.85}
+    continue: {browse_category: 0.7, view_product: 0.9, add_to_cart: 0.9, checkout: 0.75, purchase: 0.85}

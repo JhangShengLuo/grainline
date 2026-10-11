@@ -63,6 +63,19 @@ events:
       revenue: {type: number, min: 0, description: 訂單金額（新台幣，未扣折扣）, from: cart.total}
       item_count: {type: integer, min: 1, from: cart.count}
 
+  product_impression:
+    description: 商品卡片出現在畫面上（首頁精選、分類頁）
+    trigger: 商品卡片進入可視範圍（每次頁面載入每張卡片最多一次）
+    fires_on: [product_impression]
+    properties:
+      product_id: {type: string, from: product.id}
+      list_name:
+        type: string
+        enum: [home_featured, category]
+        description: 在哪個列表
+        from: list.name
+      position: {type: integer, min: 1, description: 列表中的位置（從 1 開始）, from: list.position}
+
   login:
     description: 登入成功
     trigger: 登入 API 回傳成功，之後的事件都會帶 user_id

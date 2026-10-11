@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { formatPrice, type Product } from "../api";
@@ -8,16 +8,44 @@ import { useCatalog } from "./ShopLayout";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function ProductGrid({ products }: { products: Product[] }) {
+/** 商品卡片進入畫面一半以上時回報一次曝光（每次頁面載入每張卡片最多一次） */
+function ProductCard({ product, list, position }: { product: Product; list: string; position: number }) {
+  const ref = useRef<HTMLAnchorElement>(null);
+  const { tracker } = useTracking();
+  const location = useLocation();
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return;
+        observer.disconnect();
+        tracker.moment("product_impression", {
+          product: { id: product.id, price: product.price },
+          list: { name: list, position },
+        });
+      },
+      { threshold: 0.5 },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [tracker, product.id, product.price, list, position, location.key]);
+
+  return (
+    <Link ref={ref} to={`/shop/p/${product.id}`} className="card">
+      <div className="thumb" aria-hidden="true">{product.name.slice(-2)}</div>
+      <div className="card-name">{product.name}</div>
+      <div className="card-price">{formatPrice(product.price)}</div>
+    </Link>
+  );
+}
+
+function ProductGrid({ products, list }: { products: Product[]; list: string }) {
   return (
     <ul className="grid">
-      {products.map((p) => (
+      {products.map((p, i) => (
         <li key={p.id}>
-          <Link to={`/shop/p/${p.id}`} className="card">
-            <div className="thumb" aria-hidden="true">{p.name.slice(-2)}</div>
-            <div className="card-name">{p.name}</div>
-            <div className="card-price">{formatPrice(p.price)}</div>
-          </Link>
+          <ProductCard product={p} list={list} position={i + 1} />
         </li>
       ))}
     </ul>
@@ -45,7 +73,10 @@ export function HomePage() {
     <>
       <h1>本週精選</h1>
       <Categories catalog={catalog} />
-      <ProductGrid products={catalog.slice(0, 12)} />
+      <ProductGrid
+        list="home_featured"
+        products={catalog.filter((p) => p.featured_rank).sort((a, b) => a.featured_rank! - b.featured_rank!)}
+      />
     </>
   );
 }
@@ -59,7 +90,7 @@ export function CategoryPage() {
     <>
       <h1>{category}</h1>
       <Categories catalog={catalog} current={category} />
-      <ProductGrid products={catalog.filter((p) => p.category === category)} />
+      <ProductGrid list="category" products={catalog.filter((p) => p.category === category)} />
     </>
   );
 }

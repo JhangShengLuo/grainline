@@ -1,4 +1,3 @@
-import shutil
 from pathlib import Path
 
 import pytest
@@ -6,14 +5,12 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 
-from .conftest import SHOP_SPECS
+from .conftest import copy_small_specs
 
 
 @pytest.fixture
 def spec_dir(tmp_path: Path) -> Path:
-    target = tmp_path / "shop"
-    shutil.copytree(SHOP_SPECS, target)
-    return target
+    return copy_small_specs(tmp_path / "shop")
 
 
 @pytest.fixture
@@ -69,9 +66,9 @@ def test_editing_specs_rebuilds_on_next_request(client: TestClient, spec_dir: Pa
     l1 = spec_dir / "tracking_plans" / "v1.yaml"
     l1.write_text(
         l1.read_text(encoding="utf-8").replace(
-            "      item_count: {type: integer, min: 1, from: cart.count}\n\n  login:",
+            "      item_count: {type: integer, min: 1, from: cart.count}\n\n  product_impression:",
             "      item_count: {type: integer, min: 1, from: cart.count}\n"
-            "      coupon_code: {type: string, from: order.coupon_code}\n\n  login:",
+            "      coupon_code: {type: string, from: order.coupon_code}\n\n  product_impression:",
         ),
         encoding="utf-8",
     )

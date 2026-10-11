@@ -66,12 +66,13 @@ def plan_changes(base: TrackingPlan, target: TrackingPlan) -> list[dict[str, Any
 
 
 def metric_events(project: Project, name: str) -> set[str]:
-    """指標最終依賴的 L1 事件；"*" 代表依賴全部事件（例如 session）。"""
+    """指標最終依賴的 L1 事件；"*" 代表依賴全部事件（例如 session），"table:x" 代表業務資料 x。"""
     events = set()
     for simple in underlying_simple(project, name):
         metric = project.metric_layer.metrics[simple]
         assert isinstance(metric, SimpleMetric)
-        events.add(project.models[metric.model].source)
+        model = project.models[metric.model]
+        events.add(model.source if model.source is not None else f"table:{model.table}")
     return events
 
 

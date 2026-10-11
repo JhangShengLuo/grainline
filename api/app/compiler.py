@@ -130,7 +130,33 @@ from marked""",
                 columns=(*STG_BASE_COLUMNS, *common, *event.properties),
             )
         )
-    return [identity, events, unknown, *per_event]
+    return [identity, events, unknown, *per_event, *_source_views(project)]
+
+
+def _source_views(project: Project) -> list[View]:
+    """業務資料來源：直接取用；有身分欄位的套用同一套身分合併規則，加上 person_id。"""
+    views = []
+    for name, source in project.sources.items():
+        columns = list(source.columns)
+        select = ", ".join(f"s.{c}" for c in columns)
+        identity = source.identity
+        if identity is None:
+            sql = f"select {select}\nfrom src_{name} s"
+        else:
+            anon = f"s.{identity.anonymous_id}" if identity.anonymous_id else "null"
+            user = f"s.{identity.user_id}" if identity.user_id else "null"
+            if project.staging.identity == "stitch_to_user":
+                person = f"coalesce({user}, i.user_id, {anon})"
+            else:
+                person = anon
+            sql = (
+                f"select {select}, {person} as person_id\n"
+                f"from src_{name} s\n"
+                f"left join stg_identity i on i.anonymous_id = {anon}"
+            )
+            columns.append("person_id")
+        views.append(View(name=f"stg_src_{name}", layer="L2", sql=sql, columns=tuple(columns)))
+    return views
 
 
 # ---------- L3 ----------

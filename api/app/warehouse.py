@@ -11,8 +11,9 @@ from typing import Any
 import duckdb
 
 from .compiler import View, apply_views, compile_project
+from .generator import World
 from .lineage import Lineage
-from .spec import Project
+from .spec import Project, Source
 
 RAW_COLUMNS = {
     "event_id": "VARCHAR",
@@ -55,13 +56,52 @@ def load_events(con: duckdb.DuckDBPyConnection, events: Iterable[dict[str, Any]]
     return count
 
 
+SOURCE_TYPES = {
+    "string": "VARCHAR",
+    "integer": "BIGINT",
+    "number": "DOUBLE",
+    "boolean": "BOOLEAN",
+    "timestamp": "TIMESTAMP",
+    "date": "DATE",
+}
+
+
+def load_source(con: duckdb.DuckDBPyConnection, name: str, source: Source, rows: list[dict[str, Any]]) -> int:
+    """業務資料來源載入成 src_<name> 表；只取合約宣告的欄位，資料裡沒有的欄位是 NULL。"""
+    columns = ", ".join(f"{col} {SOURCE_TYPES[c.type]}" for col, c in source.columns.items())
+    con.execute(f"create or replace table src_{name} ({columns})")
+    if not rows:
+        return 0
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"{name}.ndjson"
+        with path.open("w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps({k: row.get(k) for k in source.columns}, ensure_ascii=False) + "\n")
+        types = "{" + ", ".join(f"'{col}': '{SOURCE_TYPES[c.type]}'" for col, c in source.columns.items()) + "}"
+        con.execute(
+            f"insert into src_{name} select {', '.join(source.columns)} "
+            f"from read_json(?, format = 'newline_delimited', columns = {types})",
+            [str(path)],
+        )
+    return len(rows)
+
+
 def build_warehouse(
     con: duckdb.DuckDBPyConnection,
     project: Project,
-    events: Iterable[dict[str, Any]],
+    world: World | Iterable[dict[str, Any]],
     lineage: Lineage | None = None,
 ) -> list[View]:
-    load_events(con, events)
+    """載入事件與業務資料，再建立 L2–L4 view。也接受只有事件的 list（測試用）。"""
+    if isinstance(world, World):
+        load_events(con, world.events)
+        tables = world.tables
+    else:
+        load_events(con, world)
+        tables = {}
+    create_raw_events(con)
+    for name, source in project.sources.items():
+        load_source(con, name, source, tables.get(name, []))
     views = compile_project(project, lineage)
     apply_views(con, views)
     return views

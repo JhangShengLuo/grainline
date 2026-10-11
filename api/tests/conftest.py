@@ -1,3 +1,4 @@
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -8,11 +9,31 @@ import pytest
 from app.spec import Project, load_project, read_spec_files
 
 SHOP_SPECS = Path(__file__).resolve().parents[2] / "specs" / "shop"
+# 測試用比較小的模擬（demo 用 1,500 個訪客），結構和比例都一樣，只是快很多
+TEST_VISITORS = 400
+
+
+def small(project: Project) -> Project:
+    return project.model_copy(
+        update={"simulation": project.simulation.model_copy(update={"visitors": TEST_VISITORS})}
+    )
+
+
+def load_small(version: int | None = None) -> Project:
+    return small(load_project(SHOP_SPECS, version))
+
+
+def copy_small_specs(target: Path) -> Path:
+    """複製範例規格到 target，並把模擬改小（API 測試會改這份檔案）。"""
+    shutil.copytree(SHOP_SPECS, target)
+    sim = target / "simulation.yaml"
+    sim.write_text(sim.read_text(encoding="utf-8").replace("visitors: 1500", f"visitors: {TEST_VISITORS}"), encoding="utf-8")
+    return target
 
 
 @pytest.fixture
 def project() -> Project:
-    return load_project(SHOP_SPECS)
+    return load_small()
 
 
 @pytest.fixture

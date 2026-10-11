@@ -58,6 +58,7 @@ PropertyType = Literal["string", "integer", "number", "boolean"]
 # 行為和埋點分開，同一群使用者、同樣的行為，換一份 tracking plan 就會得到不同的事件。
 Moment = Literal[
     "page_load",                 # 頁面載入完成（context: page.type）
+    "product_impression",        # 商品卡片出現在畫面上（product, list）
     "product_detail_load",       # 商品詳情載入完成（product）
     "add_to_cart_click",         # 點擊「加入購物車」（product, item）
     "add_to_cart_success",       # 購物車 API 回傳成功（product, item, cart）
@@ -72,6 +73,8 @@ MOMENTS: tuple[str, ...] = Moment.__args__  # type: ignore[attr-defined]
 ContextField = Literal[
     "session.platform",
     "page.type",
+    "list.name",
+    "list.position",
     "product.id",
     "product.price",
     "item.quantity",
@@ -137,6 +140,45 @@ class TrackingPlan(Spec):
         return [name for name, event in self.events.items() if moment in event.fires_on]
 
 
+# ---------- L1 業務資料來源（非前端事件）----------
+
+SourceType = Literal["string", "integer", "number", "boolean", "timestamp", "date"]
+
+
+class SourceColumn(Spec):
+    type: SourceType
+    description: str = ""
+
+
+class SourceIdentity(Spec):
+    """來源裡哪些欄位可以對到前端的人；有的話 L2 會依同一套身分規則加上 person_id。"""
+
+    anonymous_id: Ident | None = None
+    user_id: Ident | None = None
+
+
+class Source(Spec):
+    owner: str
+    description: str = ""
+    grain: list[Ident] = Field(min_length=1)
+    columns: dict[Ident, SourceColumn] = Field(min_length=1)
+    identity: SourceIdentity | None = None
+
+    @model_validator(mode="after")
+    def _columns(self) -> Source:
+        errors = [f"grain 欄位 '{g}' 不在 columns 裡" for g in self.grain if g not in self.columns]
+        reserved = {"person_id", "source"}
+        errors += [f"欄位 '{c}' 是保留名稱" for c in self.columns if c in reserved]
+        if self.identity:
+            for role in ("anonymous_id", "user_id"):
+                col = getattr(self.identity, role)
+                if col is not None and self.columns.get(col, SourceColumn(type="integer")).type != "string":
+                    errors.append(f"identity.{role} 必須指向 string 欄位，'{col}' 不是")
+        if errors:
+            raise ValueError("\n".join(errors))
+        return self
+
+
 # ---------- L2 解析 / Staging ----------
 
 
@@ -162,13 +204,16 @@ class Column(Spec):
 class Model(Spec):
     kind: Literal["fact", "entity"]
     description: str = ""
-    source: str  # L1 事件名稱，或 "*" 代表全部事件
+    source: str | None = None  # L1 事件名稱，或 "*" 代表全部事件
+    table: Ident | None = None  # 或是 L1 業務資料來源
     grain: list[Ident] = Field(min_length=1)
     columns: dict[Ident, Column] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _grain_and_aggs(self) -> Model:
         errors = [f"grain 欄位 '{g}' 不在 columns 裡" for g in self.grain if g not in self.columns]
+        if (self.source is None) == (self.table is None):
+            errors.append("source（事件）和 table（業務資料）必須擇一")
         for name, column in self.columns.items():
             if self.kind == "fact" and column.agg is not None:
                 errors.append(f"fact 一列對應一個來源事件，欄位 '{name}' 不能有 agg")
@@ -275,12 +320,14 @@ class MetricLayer(Spec):
 # ---------- 模擬設定（只產生假資料）----------
 
 # 模擬器的使用者行為；每個行為會產生一或多個 moment
-Action = Literal["view_home", "view_product", "add_to_cart", "checkout", "purchase"]
+Action = Literal["view_home", "browse_category", "view_product", "add_to_cart", "checkout", "purchase"]
 
 
 class FunnelStep(Spec):
     action: Action
     repeat: tuple[int, int] = (1, 1)
+    # optional：沒走這一步也繼續往下（例如不一定會逛分類頁）；否則沒走就結束這次造訪
+    optional: bool = False
 
 
 class Persona(Spec):
@@ -295,6 +342,22 @@ class Catalog(Spec):
     size: int = Field(gt=0)
     price_min: float = Field(gt=0)
     price_max: float = Field(gt=0)
+    cost_ratio: tuple[float, float] = (0.4, 0.7)  # 成本佔售價的比例範圍
+
+
+class Market(Spec):
+    """市場的真相：模擬器知道、報表看不到，M8 用它來評估選品準確率。"""
+
+    featured_slots: int = Field(8, ge=0)               # 首頁精選版位數（依舊排序，不看真實品質）
+    list_depth: tuple[int, int] = (6, 20)              # 使用者在分類頁往下看幾個商品
+    position_decay: float = Field(0.85, gt=0, le=1)    # 越後面的位置越少被點
+    add_to_cart_base: float = Field(0.3, gt=0, le=1)   # 轉換傾向 1.0 的商品，看了之後加購的機率
+    attractiveness_sigma: float = Field(0.6, ge=0)     # 商品被點的吸引力差異（對數常態）
+    conversion_sigma: float = Field(0.6, ge=0)         # 商品看了之後加購的傾向差異（對數常態）
+    rising_share: float = Field(0.1, ge=0, le=1)       # 有上升趨勢的商品比例
+    rising_growth: float = Field(1.0, ge=0)            # 上升商品在整段期間吸引力增加的倍數
+    initial_stock: tuple[int, int] = (30, 300)
+    restock_days: int = Field(7, gt=0)
 
 
 class Login(Spec):
@@ -318,6 +381,7 @@ class Simulation(Spec):
     days: int = Field(gt=0)
     visitors: int = Field(gt=0)
     catalog: Catalog
+    market: Market = Market()
     login: Login | None = None
     behavior: Behavior = Behavior()
     funnel: list[FunnelStep] = Field(min_length=1)
@@ -336,6 +400,7 @@ class Simulation(Spec):
 class Project(Spec):
     name: str
     tracking_plan: TrackingPlan
+    sources: dict[Ident, Source] = {}
     staging: Staging
     models: dict[Ident, Model]
     metric_layer: MetricLayer
@@ -346,9 +411,11 @@ class Project(Spec):
         errors: list[str] = []
 
         # model 的來源事件不在 L1 不算格式錯誤：換一份 tracking plan 時這很常見，由 R3 回報影響範圍
-        for name in self.models:
-            if name.startswith(("stg_", "rpt_")):
-                errors.append(f"L3 model '{name}' 不能使用保留前綴 stg_ / rpt_")
+        for name, model in self.models.items():
+            if name.startswith(("stg_", "rpt_", "src_")):
+                errors.append(f"L3 model '{name}' 不能使用保留前綴 stg_ / rpt_ / src_")
+            if model.table is not None and model.table not in self.sources:
+                errors.append(f"L3 model '{name}': 業務資料來源 '{model.table}' 不存在於 l1_sources.yaml")
 
         metrics = self.metric_layer.metrics
         for name, metric in metrics.items():
@@ -387,6 +454,7 @@ class Project(Spec):
 
 # L2–L4 與模擬設定每一層一個檔案；L1 可以有多個版本，放在 tracking_plans/
 SPEC_FILES = {
+    "sources": "l1_sources.yaml",
     "staging": "l2_staging.yaml",
     "models": "l3_models.yaml",
     "metric_layer": "l4_metrics.yaml",
@@ -428,7 +496,10 @@ def read_spec_files(spec_dir: Path, plan_version: int | None = None) -> dict[str
         raise KeyError(f"沒有 tracking plan v{version}（有：{', '.join(f'v{v}' for v in plans)}）")
     raw: dict[str, Any] = {"name": spec_dir.name, "tracking_plan": plans[version]}
     for key, filename in SPEC_FILES.items():
-        raw[key] = _read_yaml(spec_dir / filename)
+        path = spec_dir / filename
+        if key == "sources" and not path.exists():
+            continue  # 業務資料來源是選用的
+        raw[key] = _read_yaml(path)
     return raw
 
 

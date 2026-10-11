@@ -190,14 +190,98 @@ class Staging(Spec):
 # ---------- L3 實體與事實模型 ----------
 
 
+class Lookup(Spec):
+    """從另一個 L3 model 帶欄位進來：用這個 model 的 by 欄位，對上那個 model 的 grain。
+
+    （不叫 on：YAML 會把 on 讀成布林值 true。）
+    """
+
+    model: Ident
+    column: Ident
+    by: Ident
+
+
+_EXPR_TOKEN = re.compile(r"\s*(?:([a-z][a-z0-9_]*)|(\d+(?:\.\d+)?)|([-+*/()]))")
+
+
+def expr_columns(expr: str) -> list[str]:
+    """受限運算式（欄位、數字、四則運算、括號）裡引用的欄位；不合文法就報錯。
+
+    文法：expr := term (('+'|'-') term)*；term := factor (('*'|'/') factor)*；
+    factor := '-' factor | 數字 | 欄位 | '(' expr ')'。不允許函式、次方或其他任何東西。
+    """
+    tokens: list[tuple[str, str]] = []
+    pos = 0
+    while pos < len(expr):
+        if expr[pos].isspace():
+            pos += 1
+            continue
+        match = _EXPR_TOKEN.match(expr, pos)
+        if not match or match.end() == pos:
+            raise ValueError(f"expr 只能有欄位、數字與 + - * / ( )：'{expr}' 在第 {pos + 1} 個字元出錯")
+        name, number, op = match.groups()
+        tokens.append(("name", name) if name else ("number", number) if number else ("op", op))
+        pos = match.end()
+
+    names: list[str] = []
+    index = 0
+
+    def peek() -> tuple[str, str] | None:
+        return tokens[index] if index < len(tokens) else None
+
+    def take(value: str | None = None) -> tuple[str, str]:
+        nonlocal index
+        token = peek()
+        if token is None or (value is not None and token != ("op", value)):
+            raise ValueError(f"expr 文法錯誤：'{expr}'")
+        index += 1
+        return token
+
+    def factor() -> None:
+        token = take()
+        if token == ("op", "-"):
+            factor()
+        elif token == ("op", "("):
+            sum_()
+            take(")")
+        elif token[0] == "name":
+            names.append(token[1])
+        elif token[0] != "number":
+            raise ValueError(f"expr 文法錯誤：'{expr}'")
+
+    def term() -> None:
+        factor()
+        while peek() in (("op", "*"), ("op", "/")):
+            take()
+            factor()
+
+    def sum_() -> None:
+        term()
+        while peek() in (("op", "+"), ("op", "-")):
+            take()
+            term()
+
+    sum_()
+    if index != len(tokens):
+        raise ValueError(f"expr 文法錯誤：'{expr}'")
+    return names
+
+
 class Column(Spec):
     from_: Ident | None = Field(None, alias="from")
     agg: Literal["count", "count_distinct", "sum", "min", "max", "any_value"] | None = None
+    lookup: Lookup | None = None
+    expr: str | None = None
 
     @model_validator(mode="after")
     def _needs_source(self) -> Column:
-        if self.from_ is None and self.agg != "count":
-            raise ValueError("欄位需要 from（只有 agg: count 可以省略）")
+        kinds = sum(x is not None for x in (self.from_, self.lookup, self.expr))
+        if kinds > 1:
+            raise ValueError("欄位的 from、lookup、expr 只能擇一")
+        if kinds == 0 and self.agg != "count":
+            raise ValueError("欄位需要 from、lookup 或 expr（只有 agg: count 可以省略）")
+        if self.expr is not None:
+            expr_columns(self.expr)
         return self
 
 
@@ -217,6 +301,17 @@ class Model(Spec):
         for name, column in self.columns.items():
             if self.kind == "fact" and column.agg is not None:
                 errors.append(f"fact 一列對應一個來源事件，欄位 '{name}' 不能有 agg")
+            if column.lookup is not None:
+                if self.kind == "entity":
+                    errors.append(f"entity 的欄位 '{name}' 不能用 lookup")
+                elif column.lookup.by not in self.columns or self.columns[column.lookup.by].from_ is None:
+                    errors.append(f"欄位 '{name}' 的 lookup.by '{column.lookup.by}' 必須是這個 model 用 from 取得的欄位")
+            if column.expr is not None:
+                if self.kind == "entity":
+                    errors.append(f"entity 的欄位 '{name}' 不能用 expr")
+                for ref in expr_columns(column.expr):
+                    if ref == name or ref not in self.columns or self.columns[ref].expr is not None:
+                        errors.append(f"欄位 '{name}' 的 expr 引用 '{ref}'：必須是這個 model 裡不是 expr 的其他欄位")
             if self.kind == "entity":
                 if name in self.grain and column.agg is not None:
                     errors.append(f"entity 的 grain 欄位 '{name}' 不能有 agg")
@@ -270,8 +365,10 @@ class RatioMetric(Spec):
     type: Literal["ratio"]
     label: str
     description: str = ""
-    # rate：分子是分母的子集（轉換率），per_unit：每單位平均（客單價）
-    kind: Literal["rate", "per_unit"] = "rate"
+    # rate：分子是分母的子集（轉換率）
+    # per_unit：每單位平均，分子分母同一個母體（客單價）
+    # funnel：漏斗下一步 ÷ 上一步，不同事件、不保證子集（點擊率：商品頁瀏覽不一定來自曝光）
+    kind: Literal["rate", "per_unit", "funnel"] = "rate"
     numerator: Ident
     denominator: Ident
     additivity: Literal["non_additive"] = "non_additive"
@@ -416,6 +513,13 @@ class Project(Spec):
                 errors.append(f"L3 model '{name}' 不能使用保留前綴 stg_ / rpt_ / src_")
             if model.table is not None and model.table not in self.sources:
                 errors.append(f"L3 model '{name}': 業務資料來源 '{model.table}' 不存在於 l1_sources.yaml")
+            for col, column in model.columns.items():
+                if column.lookup and column.lookup.model not in self.models:
+                    errors.append(f"L3 {name}.{col}: lookup 的 model '{column.lookup.model}' 不存在")
+        try:
+            model_order(self.models)
+        except ValueError as exc:
+            errors.append(str(exc))
 
         metrics = self.metric_layer.metrics
         for name, metric in metrics.items():
@@ -450,6 +554,28 @@ class Project(Spec):
         if errors:
             raise ValueError("\n".join(errors))
         return self
+
+
+def model_order(models: dict[str, Model]) -> list[str]:
+    """依 lookup 相依排序：被查的 model 先建立。有循環就報錯。"""
+    order: list[str] = []
+    state: dict[str, str] = {}
+
+    def visit(name: str, path: tuple[str, ...]) -> None:
+        if state.get(name) == "done":
+            return
+        if state.get(name) == "visiting":
+            raise ValueError(f"L3 lookup 形成循環：{' → '.join((*path, name))}")
+        state[name] = "visiting"
+        for column in models[name].columns.values():
+            if column.lookup and column.lookup.model in models:
+                visit(column.lookup.model, (*path, name))
+        state[name] = "done"
+        order.append(name)
+
+    for name in models:
+        visit(name, ())
+    return order
 
 
 # L2–L4 與模擬設定每一層一個檔案；L1 可以有多個版本，放在 tracking_plans/

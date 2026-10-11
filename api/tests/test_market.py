@@ -147,7 +147,7 @@ def test_catalog_has_featured_ranks(client: TestClient) -> None:
 
 
 def test_backend_metric_explains_its_source(client: TestClient) -> None:
-    body = client.get("/metrics/line_revenue/explain").json()
+    body = client.get("/metrics/ordered_product_sales/explain").json()
     assert "後端" in body["steps"][0]["text"] and "不受前端埋點設計影響" in body["steps"][0]["text"]
     assert body["example"]["rows_source"] == "order_lines"
     assert body["example"]["rows"]
@@ -157,6 +157,6 @@ def test_models_page_lists_sources(client: TestClient) -> None:
     sources = {s["name"]: s for s in client.get("/models").json()["sources"]}
     assert sources["order_lines"]["owner"] == "後端"
     assert sources["order_lines"]["grain_check"]["ok"] is True
-    lineage = client.get("/metrics/units_sold/lineage").json()
+    lineage = client.get("/metrics/units_ordered/lineage").json()
     measure = next(f for f in lineage["fields"] if f["role"] == "measure")
     assert measure["hops"][-1]["name"] == "order_lines.quantity"

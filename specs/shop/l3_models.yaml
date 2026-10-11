@@ -5,6 +5,8 @@
 # kind: entity  依 grain 分組，非 grain 欄位要宣告 agg
 # grain 宣告「一列代表什麼」，是 L4 可加性檢查的依據
 # from 只能引用來源 stg view 的欄位，這樣每個欄位都能追溯回 L1（血緣可達）
+# lookup：從另一個 model 帶欄位進來（用 by 對上那個 model 的 grain；那個 model 必須一個 key 只有一列，否則會一對多）
+# expr：用同一個 model 的其他欄位做四則運算（只能有欄位、數字、+ - * / 和括號）
 # source: "*" 代表全部事件（stg_events）
 
 fct_page_views:
@@ -119,6 +121,8 @@ fct_order_lines:
     coupon_code: {from: coupon_code}
     ordered_at: {from: ordered_at}
     person_id: {from: person_id}
+    unit_cost: {lookup: {model: dim_products, column: cost, by: product_id}}
+    gross_margin: {expr: "line_revenue - quantity * unit_cost"}
 
 dim_products:
   kind: fact

@@ -184,6 +184,8 @@ def _caveats(project: Project, findings: list[Finding], name: str) -> list[dict[
     additivity = effective_additivity(project, name)
     if isinstance(metric, RatioMetric):
         caveats.append({"level": "info", "text": "比率不能相加或平均：跨期間、跨分組都要用分子、分母重新算。"})
+        if metric.kind == "funnel":
+            caveats.append({"level": "info", "text": "漏斗比率的分子不一定來自分母（例如從外部連結直接進商品頁，沒有經過曝光），所以單一商品、單一天可能大於 100%；樣本少時波動很大。"})
     elif additivity == "non_additive":
         caveats.append({"level": "info",
                         "text": "不能把每天的數字加起來當作一週（或把各平台加起來當總數）：同一個人來好幾天、用好幾個平台，就會被算好幾次。"})
@@ -461,6 +463,8 @@ def explain_metric(project: Project, lineage: Lineage, findings: list[Finding],
              "steps": _simple_steps(project, lineage, metric.denominator)},
         ]
         result["formula"] = f"在同一個期間，分別算出{metrics[metric.numerator].label}和{metrics[metric.denominator].label}，再相除。"
+        if metric.kind == "funnel":
+            result["formula"] += "這是漏斗比率：下一步 ÷ 上一步。"
     else:
         of = metrics[metric.of]
         verb = {"sum": "加總", "avg": "平均", "min": "取最小", "max": "取最大"}[metric.agg]

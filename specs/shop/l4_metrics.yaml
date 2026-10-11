@@ -5,9 +5,13 @@
 #     additive       可以跨時間、跨維度直接加總（例：訂單數、營收）
 #     semi_additive  可跨維度加總，但不能跨時間加總（例：庫存、會員數快照）
 #     non_additive   不能加總（例：不重複人數、比率）
+# 指標名稱和內建的行銷指標庫（api/app/library/marketing.yaml）相同時，就算用了指標庫的定義，
+# console 的「指標庫」頁會檢查做法是否一致、還缺哪些資料。
+#
 # ratio metric：numerator / denominator，必定 non_additive。
 #   kind: rate      分子必須是分母的子集（例：轉換率）
 #   kind: per_unit  每單位平均，分子分母來自同一個 model、同樣的篩選（例：客單價）
+#   kind: funnel    漏斗下一步 ÷ 上一步，不保證子集，單一商品可能 > 1（例：點擊率）
 #   報表會先在報表的 grain 上分別算出分子、分母，再相除，不會對比率本身做加總。
 # rollup metric：先在 from_grain 算出 of，再用 agg 彙總到報表的 grain（只有 of 可加時才正確）
 # report：metrics × dimensions × time_grain（day / week / month），編譯成 rpt_<name> view
@@ -114,19 +118,80 @@ metrics:
     numerator: buyers
     denominator: web_uv
 
-  impressions:
+  # ---------- 商品（grain：商品 × 期間，報表用 product_id 當維度）----------
+
+  product_impressions:
     label: 商品曝光數
     model: fct_product_impressions
     time_column: ts
     measure: {agg: count}
     additivity: additive
 
-  units_sold:
-    label: 銷售件數（後端）
+  product_detail_views:
+    label: 商品頁瀏覽數
+    model: fct_product_views
+    time_column: ts
+    measure: {agg: count}
+    additivity: additive
+
+  product_ctr:
+    type: ratio
+    kind: funnel
+    label: 商品點擊率
+    numerator: product_detail_views
+    denominator: product_impressions
+
+  add_to_cart_rate:
+    type: ratio
+    kind: funnel
+    label: 加購率
+    numerator: cart_adds
+    denominator: product_detail_views
+
+  units_ordered:
+    label: 銷售件數
     model: fct_order_lines
     time_column: ordered_at
     measure: {agg: sum, column: quantity}
     additivity: additive
+
+  unit_session_percentage:
+    type: ratio
+    kind: funnel
+    label: 商品轉換率
+    description: 銷售件數 ÷ 商品頁瀏覽數
+    numerator: units_ordered
+    denominator: product_detail_views
+
+  ordered_product_sales:
+    label: 商品營收
+    model: fct_order_lines
+    time_column: ordered_at
+    measure: {agg: sum, column: line_revenue}
+    additivity: additive
+
+  gross_margin:
+    label: 毛利
+    model: fct_order_lines
+    time_column: ordered_at
+    measure: {agg: sum, column: gross_margin}
+    additivity: additive
+
+  margin_rate:
+    type: ratio
+    kind: per_unit
+    label: 毛利率
+    numerator: gross_margin
+    denominator: ordered_product_sales
+
+  stockout_days:
+    label: 缺貨天數
+    model: fct_inventory_daily
+    time_column: date
+    measure: {agg: count}
+    additivity: additive
+    filters:
+      - {column: on_hand, op: eq, value: 0}
 
   backend_orders:
     label: 訂單數（後端）
@@ -134,13 +199,6 @@ metrics:
     time_column: ordered_at
     measure: {agg: count_distinct, column: order_id}
     additivity: non_additive
-
-  line_revenue:
-    label: 營收（後端）
-    model: fct_order_lines
-    time_column: ordered_at
-    measure: {agg: sum, column: line_revenue}
-    additivity: additive
 
 reports:
   daily_overview:
@@ -168,4 +226,10 @@ reports:
   frontend_vs_backend:
     label: 前端事件 vs 後端資料
     time_grain: day
-    metrics: [orders, backend_orders, revenue, line_revenue]
+    metrics: [orders, backend_orders, revenue, ordered_product_sales]
+
+  product_weekly:
+    label: 商品每週表現
+    time_grain: week
+    dimensions: [product_id]
+    metrics: [product_impressions, product_detail_views, product_ctr, cart_adds, add_to_cart_rate, units_ordered, unit_session_percentage, ordered_product_sales, gross_margin, margin_rate, stockout_days]

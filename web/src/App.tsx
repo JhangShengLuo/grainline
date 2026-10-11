@@ -4,6 +4,7 @@ import { ChecksPage } from "./console/ChecksPage";
 import { ConsoleHome, ConsoleLayout } from "./console/ConsoleLayout";
 import { DiffPage } from "./console/DiffPage";
 import { EventsPage } from "./console/EventsPage";
+import { LibraryPage } from "./console/LibraryPage";
 import { MetricDetailPage, MetricsPage } from "./console/MetricsPage";
 import { ModelsPage } from "./console/ModelsPage";
 import { ReportsPage } from "./console/ReportsPage";
@@ -47,6 +48,7 @@ export function App() {
         <Route path="metrics" element={<MetricsPage />} />
         <Route path="metrics/:name" element={<MetricDetailPage />} />
         <Route path="events" element={<EventsPage />} />
+        <Route path="library" element={<LibraryPage />} />
         <Route path="models" element={<ModelsPage />} />
         <Route path="reports" element={<ReportsPage />} />
         <Route path="checks" element={<ChecksPage />} />

@@ -14,7 +14,7 @@ from typing import Literal
 import duckdb
 
 from .lineage import DUCK_TYPES, Lineage, resolve, source_view
-from .spec import Column, Filter, Project, Property, RatioMetric, RollupMetric, SimpleMetric
+from .spec import Column, Filter, Project, Property, RatioMetric, RollupMetric, SimpleMetric, model_order
 
 STG_BASE_COLUMNS = (
     "event_id",
@@ -162,15 +162,16 @@ def _source_views(project: Project) -> list[View]:
 # ---------- L3 ----------
 
 
-def _column_expr(column: Column) -> str:
+def _column_expr(column: Column, prefix: str = "") -> str:
+    source = f"{prefix}{column.from_}" if column.from_ else None
     match column.agg:
         case None:
-            return column.from_
+            return source or "null"
         case "count":
-            return f"count({column.from_})" if column.from_ else "count(*)"
+            return f"count({source})" if source else "count(*)"
         case "count_distinct":
-            return f"count(distinct {column.from_})"
-    return f"{column.agg}({column.from_})"
+            return f"count(distinct {source})"
+    return f"{column.agg}({source})"
 
 
 def _model_view(project: Project, lineage: Lineage, name: str) -> View | None:
@@ -178,10 +179,32 @@ def _model_view(project: Project, lineage: Lineage, name: str) -> View | None:
         return None
     model = project.models[name]
     usable = lineage.usable_columns(name)
-    select = ",\n    ".join(f"{_column_expr(model.columns[col])} as {col}" for col in usable)
-    sql = f"select\n    {select}\nfrom {source_view(model)}"
+    source = source_view(model)
+
     if model.kind == "entity":
-        sql += "\ngroup by " + ", ".join(model.columns[g].from_ for g in model.grain)
+        select = ",\n    ".join(f"{_column_expr(model.columns[col])} as {col}" for col in usable)
+        sql = f"select\n    {select}\nfrom {source}\ngroup by " + ", ".join(model.columns[g].from_ for g in model.grain)
+        return View(name=name, layer="L3", sql=sql, columns=tuple(usable))
+
+    # fact：取用欄位、lookup 用 left join 帶進來（只對單一 key 的 grain，不會一對多），運算欄位在外層計算
+    base, joins = [], []
+    for col in usable:
+        c = model.columns[col]
+        if c.expr is not None:
+            continue
+        if c.lookup is not None:
+            alias = f"lk_{col}"
+            target_grain = project.models[c.lookup.model].grain[0]
+            on_source = model.columns[c.lookup.by].from_
+            joins.append(f"left join {c.lookup.model} {alias} on {alias}.{target_grain} = s.{on_source}")
+            base.append(f"{alias}.{c.lookup.column} as {col}")
+        else:
+            base.append(f"{_column_expr(c, 's.')} as {col}")
+    sql = "select\n    " + ",\n    ".join(base) + f"\nfrom {source} s" + "".join(f"\n{j}" for j in joins)
+    exprs = [col for col in usable if model.columns[col].expr is not None]
+    if exprs:
+        outer = [f"({model.columns[col].expr}) as {col}" if col in exprs else col for col in usable]
+        sql = "select " + ", ".join(outer) + f"\nfrom (\n{sql}\n)"
     return View(name=name, layer="L3", sql=sql, columns=tuple(usable))
 
 
@@ -305,7 +328,7 @@ def compile_project(project: Project, lineage: Lineage | None = None, strict: bo
         if errors:
             raise CompileError(errors)
     views = _staging_views(project)
-    for name in project.models:
+    for name in model_order(project.models):  # 被 lookup 的 model 先建立
         if view := _model_view(project, lineage, name):
             views.append(view)
     for name in project.metric_layer.reports:

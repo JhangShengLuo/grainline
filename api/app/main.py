@@ -28,6 +28,7 @@ from .diff import compare
 from .explain import event_catalog, explain_metric, metric_list, model_catalog
 from .generator import World, simulate
 from .ingest import IngestBatch, IncomingEvent, LiveStore, plan_warnings
+from .library import coverage, load_library
 from .lineage import Lineage, metric_lineage, resolve
 from .spec import Project, default_plan_version, load_project, read_tracking_plans
 from .warehouse import build_warehouse, load_events
@@ -228,6 +229,21 @@ def create_app(spec_dir: Path | None = None, data_dir: Path | None = None) -> Fa
             if name not in state.project.metric_layer.metrics:
                 raise HTTPException(404, f"沒有指標 {name}")
             return explain_metric(state.project, state.lineage, state.findings(), state.con, name, example)
+
+    @app.get("/library")
+    def library(plan: int | None = PlanParam) -> dict[str, Any]:
+        """內建的行銷指標庫，以及每個指標在這個 tracking plan 下能不能算、還缺什麼、找誰。"""
+        with workspace.lock:
+            state = workspace.state(plan)
+        lib = load_library()
+        items = coverage(state.project, state.lineage, lib)
+        return {
+            "tracking_plan_version": state.project.tracking_plan.version,
+            "groups": lib.groups,
+            "summary": {status: sum(i["status"] == status for i in items)
+                        for status in ("available", "differs", "buildable", "blocked")},
+            "metrics": items,
+        }
 
     @app.get("/events")
     def events(plan: int | None = PlanParam) -> dict[str, Any]:

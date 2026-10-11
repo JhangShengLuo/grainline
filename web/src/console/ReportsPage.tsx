@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import type { Product } from "../api";
 import { ApiError, formatValue, planQuery, usePlanParam, useApi, withGaps } from "./api";
 import { LineagePanel } from "./LineagePanel";
 import { LineChart, type Series } from "./LineChart";
@@ -48,6 +49,10 @@ export function ReportsPage() {
   const name = params.get("report") ?? reports.data?.[0]?.name ?? null;
   const report = useApi<ReportData>(name ? `/reports/${name}${planQuery(plan)}` : null, 3000);
   const [chartMetric, setChartMetric] = useState<string | null>(null);
+  const catalog = useApi<Product[]>("/catalog");
+  const productName = new Map(catalog.data?.map((p) => [p.id, p.name]) ?? []);
+  const dimValue = (d: string, v: unknown) =>
+    v === null ? "（空）" : d === "product_id" && productName.has(String(v)) ? `${productName.get(String(v))}（${v}）` : String(v);
   const [lineage, setLineage] = useState<string | null>(null);
 
   const select = (next: string) =>
@@ -132,7 +137,7 @@ export function ReportsPage() {
                           {String(row.period)}
                           {live && <span className="tag live-tag">含商店點擊</span>}
                         </td>
-                        {data.dimensions.map((d) => <td key={d}>{row[d] === null ? "（空）" : String(row[d])}</td>)}
+                        {data.dimensions.map((d) => <td key={d}>{dimValue(d, row[d])}</td>)}
                         {data.metrics.map((m) => (
                           <td key={m.name} className="num">{formatValue(row[m.name] as number | null, m.format)}</td>
                         ))}

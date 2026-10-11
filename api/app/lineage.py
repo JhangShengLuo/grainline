@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .spec import Filter, Model, Project, RatioMetric, RollupMetric, SimpleMetric
+from .spec import Filter, Model, Project, RatioMetric, RollupMetric, SimpleMetric, expr_columns, model_order
 
 FieldType = Literal["string", "integer", "number", "boolean", "timestamp", "date"]
 NUMERIC: set[str] = {"integer", "number"}
@@ -53,7 +53,7 @@ class ColumnInfo:
 
 @dataclass
 class Problem:
-    kind: Literal["missing_event", "missing_property", "missing_column", "type_mismatch", "enum_mismatch"]
+    kind: Literal["missing_event", "missing_property", "missing_column", "type_mismatch", "enum_mismatch", "lookup_fan_out"]
     subject: str
     message: str
     hops: tuple[Hop, ...]
@@ -162,8 +162,9 @@ class _Resolver:
         self._metric_problems: dict[str, list[Problem]] = {}
 
     def run(self) -> Lineage:
-        for name, model in self.project.models.items():
-            self._model(name, model)
+        # 依 lookup 相依順序：被查的 model 先解析
+        for name in model_order(self.project.models):
+            self._model(name, self.project.models[name])
         metrics = self.project.metric_layer.metrics
         # simple → ratio → rollup，確保依賴先處理
         for kind in (SimpleMetric, RatioMetric, RollupMetric):
@@ -201,6 +202,11 @@ class _Resolver:
             event_desc = "L1 共用 property" if model.source == "*" else f"L1 事件 {model.source}"
         columns: dict[str, ColumnInfo] = {}
         for col, c in model.columns.items():
+            if c.expr is not None:
+                continue  # 運算欄位等其他欄位都解析完再處理
+            if c.lookup is not None:
+                columns[col] = self._lookup(name, col, c.lookup)
+                continue
             l3 = Hop("L3", f"{name}.{col}", f"{c.agg}({c.from_ or '*'})" if c.agg else f"from {c.from_}")
             if c.from_ is None:
                 columns[col] = ColumnInfo("integer", (l3,))
@@ -223,11 +229,74 @@ class _Resolver:
                 type_ = _AGG_TYPES.get(c.agg, f.type) if c.agg else f.type
                 keeps_values = c.agg in (None, "min", "max", "any_value")
                 columns[col] = ColumnInfo(type_, (l3, *f.hops), f.enum if keeps_values else None)
-        self.columns[name] = columns
+        for col, c in model.columns.items():
+            if c.expr is not None:
+                columns[col] = self._expr(name, col, c.expr, columns)
+        self.columns[name] = {col: columns[col] for col in model.columns}
         broken_grain = [g for g in model.grain if columns[g].broken]
         if broken_grain:
             self.broken_models[name] = f"grain 欄位 {', '.join(broken_grain)} 血緣斷掉"
             self._model_problems[name] = [self._column_problem[(name, g)] for g in broken_grain]
+
+    def _lookup(self, name: str, col: str, lookup: Any) -> ColumnInfo:
+        target = self.project.models[lookup.model]
+        l3 = Hop("L3", f"{name}.{col}", f"lookup {lookup.model}.{lookup.column}（用 {lookup.by} 對上 {', '.join(target.grain)}）")
+        if lookup.model in self.broken_models:
+            problem = self._model_problems[lookup.model][0]
+            self._column_problem[(name, col)] = problem
+            problem.impact(f"{name}.{col}")
+            return ColumnInfo(None, (l3, Hop("L3", lookup.model, "✗ model 無法建立")), broken=self.broken_models[lookup.model])
+        if len(target.grain) != 1:
+            # 對不上完整的 grain：一列會對到好幾列，列數暴增，加總就被灌水
+            hops = (l3, Hop("L3", f"{lookup.model}", f"✗ grain 是 {', '.join(target.grain)}，不是單一個 key"))
+            problem = Problem(
+                "lookup_fan_out",
+                f"{name}.{col}",
+                f"L3 {name}.{col} 從 {lookup.model} 查值，但 {lookup.model} 一列代表 {'、'.join(target.grain)}，"
+                f"用 {lookup.by} 去對會一對多，{name} 的列數會變多、違反它的 grain",
+                hops,
+                details={"model": lookup.model, "grain": target.grain},
+            )
+            self.problems.append(problem)
+            self._column_problem[(name, col)] = problem
+            return ColumnInfo(None, hops, broken=problem.message)
+        info = self.columns[lookup.model].get(lookup.column)
+        if info is None or info.broken:
+            reason = info.broken if info else f"{lookup.model} 沒有欄位 {lookup.column}"
+            hops = (l3, Hop("L3", f"{lookup.model}.{lookup.column}", "✗ 不存在" if info is None else "✗ 斷鏈"))
+            if info is None:
+                problem = Problem("missing_column", f"{name}.{col}", f"L3 {name}.{col}：{reason}", hops,
+                                  details={"model": lookup.model, "column": lookup.column})
+                self.problems.append(problem)
+            else:
+                problem = self._column_problem[(lookup.model, lookup.column)]
+                problem.impact(f"{name}.{col}")
+            self._column_problem[(name, col)] = problem
+            return ColumnInfo(None, hops, broken=reason)
+        return ColumnInfo(info.type, (l3, *info.hops), info.enum)
+
+    def _expr(self, name: str, col: str, expr: str, columns: dict[str, ColumnInfo]) -> ColumnInfo:
+        refs = expr_columns(expr)
+        l3 = Hop("L3", f"{name}.{col}", f"= {expr}")
+        for ref in refs:
+            dep = columns[ref]
+            if dep.broken:
+                problem = self._column_problem[(name, ref)]
+                problem.impact(f"{name}.{col}")
+                self._column_problem[(name, col)] = problem
+                return ColumnInfo(None, (l3, *dep.hops), broken=dep.broken)
+        wrong = [r for r in refs if columns[r].type not in NUMERIC]
+        if wrong:
+            problem = Problem(
+                "type_mismatch",
+                f"{name}.{col}",
+                f"L3 {name}.{col} = {expr}：{', '.join(f'{r}（{columns[r].type}）' for r in wrong)} 不是數值，不能做運算",
+                (l3,),
+            )
+            self.problems.append(problem)
+            self._column_problem[(name, col)] = problem
+            return ColumnInfo(None, (l3,), broken=problem.message)
+        return ColumnInfo("number", (l3,))
 
     # ---------- L4 ----------
 
@@ -298,10 +367,10 @@ class _Resolver:
 
         info, broken = self._ref(owner, model, metric.time_column, "time_column")
         causes += broken
-        if info and info.type != "timestamp":
+        if info and info.type not in ("timestamp", "date"):
             causes.append(self._type_problem(
                 owner, "time_column", info,
-                f"{owner} 的 time_column {model}.{metric.time_column} 是 {info.type}，必須是時間欄位",
+                f"{owner} 的 time_column {model}.{metric.time_column} 是 {info.type}，必須是時間或日期欄位",
             ))
 
         measure = metric.measure

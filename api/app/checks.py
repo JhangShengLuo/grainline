@@ -51,9 +51,9 @@ def effective_additivity(project: Project, name: str) -> str:
 
 
 def metric_format(project: Project, name: str) -> str:
-    """前端顯示用：rate 顯示百分比，其他顯示數字。"""
+    """前端顯示用：rate、funnel 顯示百分比，其他顯示數字。"""
     metric = project.metric_layer.metrics[name]
-    return "percent" if isinstance(metric, RatioMetric) and metric.kind == "rate" else "number"
+    return "percent" if isinstance(metric, RatioMetric) and metric.kind in ("rate", "funnel") else "number"
 
 
 def _nests(fine: str, coarse: str) -> bool:
@@ -178,6 +178,15 @@ def _r2(project: Project) -> list[Finding]:
                     f"分子會包含不在分母母體裡的 {num_unit or '資料'}。",
                     impacted, _context=context,
                 ))
+        elif metric.kind == "funnel":
+            # 漏斗的每一步都是可加的計數或件數加總（例如銷售件數 ÷ 商品頁瀏覽）
+            countable = lambda m: m.measure.agg in ("count", "count_distinct", "sum")  # noqa: E731
+            if not (countable(num) and countable(den)):
+                findings.append(Finding(
+                    "R2", "error", "rate_unit", f"metric:{name}",
+                    f"{_label(project, name)} 是漏斗比率，分子分母都必須是計數或件數加總（count / count_distinct / sum）。",
+                    impacted, _context=context,
+                ))
         elif num.model != den.model or sorted(map(repr, num.filters)) != sorted(map(repr, den.filters)):
             findings.append(Finding(
                 "R2", "error", "per_unit_population", f"metric:{name}",
@@ -192,9 +201,10 @@ def _r2(project: Project) -> list[Finding]:
 
 
 def _r3(lineage: Lineage) -> list[Finding]:
+    # lookup 一對多會違反 grain，歸在 R1；其他血緣問題是 R3
     return [
         Finding(
-            "R3", "error", p.kind, p.subject, p.message, list(p.impacted),
+            "R1" if p.kind == "lookup_fan_out" else "R3", "error", p.kind, p.subject, p.message, list(p.impacted),
             _context={"problem": p},
         )
         for p in lineage.problems
@@ -342,7 +352,9 @@ def _lineage_evidence(con: duckdb.DuckDBPyConnection, project: Project, problem:
 def _attach_evidence(con: duckdb.DuckDBPyConnection, project: Project, lineage: Lineage, finding: Finding) -> None:
     ctx = finding._context
     try:
-        if finding.rule == "R1":
+        if "problem" in ctx:  # 血緣問題（包括歸在 R1 的 lookup 一對多）
+            finding.evidence = _lineage_evidence(con, project, ctx["problem"])
+        elif finding.rule == "R1":
             if ctx["metric"] in lineage.broken_metrics:
                 return
             finding.evidence = rollup_comparison(con, project, ctx["metric"], ctx["from_grain"], ctx["to_grain"], ctx["agg"])
@@ -350,8 +362,6 @@ def _attach_evidence(con: duckdb.DuckDBPyConnection, project: Project, lineage: 
             if ctx["ratio"] in lineage.broken_metrics:
                 return
             finding.evidence = rate_membership(con, project, ctx["ratio"], ctx["grain"])
-        else:
-            finding.evidence = _lineage_evidence(con, project, ctx["problem"])
     except duckdb.Error as exc:  # 證據算不出來不應該讓整個檢查失敗
         finding.evidence = {"summary": f"無法計算證據：{exc}"}
 
@@ -420,12 +430,22 @@ def check_project(
     # 規格上沒問題的 rate，也實際量一次分子有沒有跑出分母
     flagged = {f.subject for f in findings if f.rule == "R2"}
     for name, metric in project.metric_layer.metrics.items():
-        if not isinstance(metric, RatioMetric) or metric.kind != "rate":
+        if not isinstance(metric, RatioMetric) or metric.kind not in ("rate", "funnel"):
             continue
         if f"metric:{name}" in flagged or name in lineage.broken_metrics:
             continue
         grain = _report_grain(project, name, "day")
         evidence = rate_membership(con, project, name, grain)
+        if metric.kind == "funnel":
+            if evidence.get("periods_over_1"):
+                findings.append(Finding(
+                    "R2", "warning", "funnel_over_1", f"metric:{name}",
+                    f"{_label(project, name)} 是漏斗比率，但有些期間大於 1：下一步的事件不一定來自上一步"
+                    "（例如直接連結、外部廣告進來的商品頁瀏覽沒有曝光）。",
+                    _reports_using(project, name),
+                    evidence,
+                ))
+            continue
         if evidence.get("outside") or evidence.get("periods_over_1"):
             findings.append(Finding(
                 "R2", "warning", "rate_leakage", f"metric:{name}",

@@ -29,6 +29,7 @@ from .compiler import compile_project
 from .decisions import build_proposal, evaluate, requirements, run_decision, save_proposal
 from .diff import compare
 from .execution import simulate_execution
+from .story import across_markets, build_story
 from .explain import event_catalog, explain_metric, metric_list, model_catalog
 from .generator import World, simulate
 from .ingest import IngestBatch, IncomingEvent, LiveStore, plan_warnings
@@ -314,6 +315,27 @@ def create_app(
                     state.project, state.lineage, state.con, name, slots, horizon_days, replicates
                 )
             return state.cache[key]
+
+    @app.get("/story")
+    def story(base: int | None = Query(None), proposal: int = Query(2)) -> dict[str, Any]:
+        """傳統做法 vs Grainline：時間軸是示意，數字由模擬器實際算出。只用模擬資料。"""
+        with workspace.lock:
+            current = workspace.state(base, include_live=False)
+            other = workspace.state(proposal, include_live=False)
+            key = ("story", other.project.tracking_plan.version)
+            if key not in current.cache:
+                current.cache[key] = build_story(current, other)
+            return current.cache[key]
+
+    @app.get("/story/markets")
+    def story_markets(base: int | None = Query(None)) -> dict[str, Any]:
+        """在 6 個不同的模擬市場重複比較劇本與傳統做法（約 30 秒，結果會快取）。"""
+        with workspace.lock:
+            current = workspace.state(base, include_live=False)
+            key = ("story_markets",)
+            if key not in current.cache:
+                current.cache[key] = across_markets(current.project)
+            return current.cache[key]
 
     @app.get("/decisions/{name}/proposal")
     def decision_proposal(name: str, plan: int | None = PlanParam) -> dict[str, Any]:

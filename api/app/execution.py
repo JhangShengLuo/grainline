@@ -13,6 +13,7 @@ from typing import Any
 
 import duckdb
 
+from .compiler import metric_sql
 from .decisions import run_decision
 from .generator import Scenario, World, catalog, simulate
 from .lineage import Lineage
@@ -30,6 +31,33 @@ def _measure(world: World) -> dict[str, Any]:
     totals = {k: sum(p[k] for p in per_product.values()) for k in ("units", "revenue", "margin")}
     exposure = {t["product_id"]: t["impressions"] for t in world.truth}
     return {"totals": totals, "per_product": per_product, "exposure": exposure}
+
+
+def layout_effects(project: Project, layouts: dict[str, tuple[str, ...]], horizon_days: int = 14,
+                   replicates: int = 5) -> dict[str, dict[str, Any]]:
+    """任意幾種首頁精選配置，和維持現狀相比的毛利、營收、件數變化（同一組隨機情境逐次相減）。"""
+    sim = project.simulation
+    runs: dict[str, list[dict[str, float]]] = {k: [] for k in ("control", *layouts)}
+    for r in range(replicates):
+        seed = sim.seed * 1000 + r + 1
+        for key, layout in (("control", None), *layouts.items()):
+            world = simulate(project, Scenario(behavior_seed=seed, offset_days=sim.days, days=horizon_days, featured=layout))
+            runs[key].append(_measure(world)["totals"])
+    out = {}
+    for key in layouts:
+        diffs = {m: [t[m] - c[m] for t, c in zip(runs[key], runs["control"], strict=True)] for m in ("units", "revenue", "margin")}
+        out[key] = {m: _range(v) for m, v in diffs.items()} | {"per_run": diffs}
+    return out
+
+
+def featured_performance(project: Project, con: duckdb.DuckDBPyConnection, featured: list[str]) -> dict[str, float]:
+    """首頁精選商品過去的每次曝光毛利（用倉儲裡的資料，不是真相）。"""
+    def per_product(metric: str) -> dict[str, float]:
+        sql = f"select product_id, {metric} from ({metric_sql(project, metric, 'all', ['product_id'])})"
+        return {k: float(v or 0) for k, v in con.execute(sql).fetchall()}
+
+    impressions, margin = per_product("product_impressions"), per_product("gross_margin")
+    return {p: margin.get(p, 0.0) / max(impressions.get(p, 0.0), 1.0) for p in featured}
 
 
 def _range(values: list[float]) -> dict[str, float]:
@@ -55,8 +83,11 @@ def simulate_execution(
 
     rows, featured = catalog(project)
     names = {r["product_id"]: r["name"] for r in rows}
-    slots = min(slots, len(featured))
-    keep, displaced = featured[: len(featured) - slots], featured[len(featured) - slots:]
+    slots = min(slots, len(featured), len(result["recommended"]))
+    # 換掉首頁精選裡表現最差的幾格（過去的每次曝光毛利最低），表現好的保留
+    per_impression = featured_performance(project, con, featured)
+    displaced = sorted(featured, key=lambda p: (per_impression[p], p))[:slots]
+    keep = [p for p in featured if p not in displaced]
     promoted = [c["entity"] for c in result["recommended"] if c["entity"] not in keep][:slots]
     # 對照組：隨機挑同樣數量、目前沒被推的商品（固定種子，每次看到的是同一組）
     pool = sorted(r["product_id"] for r in rows if r["product_id"] not in featured)
@@ -115,7 +146,7 @@ def simulate_execution(
     explanation = {
         "assumptions": [
             f"接下來 {horizon_days} 天，使用者的人數、偏好和過去 {sim.days} 天一樣；每個商品被點、被買的真實傾向不變（模擬器知道，報表看不到）。",
-            f"只改首頁精選：前 {len(keep)} 格維持不動，後 {slots} 格換成建議的商品。分類頁排序、價格、廣告都不變。",
+            f"只改首頁精選：過去 {sim.days} 天每次曝光毛利最低的 {slots} 格換成建議的商品，其他 {len(keep)} 格保留。分類頁排序、價格、廣告都不變。",
             "庫存照原本的規則每 7 天補貨；商品賣完就無法加入購物車。",
         ],
         "method": [

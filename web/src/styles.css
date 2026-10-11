@@ -308,3 +308,19 @@ a.chip-code { text-decoration: none; display: inline-block; margin-bottom: 0.2re
 .field.wide { max-width: none; }
 .field textarea { font: inherit; padding: 0.5rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); resize: vertical; }
 .chips button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+/* ---------- M11 傳統 vs Grainline ---------- */
+.story { max-width: 1150px; }
+.story h1 { font-size: 1.6rem; line-height: 1.4; margin: 0.25rem 0 0.5rem; }
+.story h2 { margin-top: 2rem; }
+.eyebrow { color: var(--accent); font-weight: 700; letter-spacing: 0.05em; margin: 0; }
+.story-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+@media (max-width: 820px) { .story-columns { grid-template-columns: minmax(0, 1fr); } }
+.story-col h3 { font-size: 1rem; margin: 0 0 0.6rem; }
+.story-steps { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.story-steps li { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); gap: 0.6rem; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.55rem 0.7rem; font-size: 0.9rem; }
+.story-steps .week { color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.doc-chip { margin-top: 0.3rem; font-size: 0.8rem; color: var(--muted); }
+.impact { margin-top: 0.3rem; font-size: 0.82rem; color: var(--warning-text); background: var(--warning-bg); border-radius: 6px; padding: 0.2rem 0.45rem; }
+.story-picks { list-style: none; padding: 0; margin: 0.5rem 0 0; font-size: 0.88rem; columns: 2; }
+.story-picks li.hit { color: var(--success); font-weight: 600; }

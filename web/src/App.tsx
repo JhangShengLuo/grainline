@@ -10,6 +10,7 @@ import { LibraryPage } from "./console/LibraryPage";
 import { MetricDetailPage, MetricsPage } from "./console/MetricsPage";
 import { ModelsPage } from "./console/ModelsPage";
 import { ReportsPage } from "./console/ReportsPage";
+import { StoryPage } from "./console/StoryPage";
 import { CartProvider } from "./shop/CartContext";
 import { ShopLayout } from "./shop/ShopLayout";
 import {
@@ -26,7 +27,7 @@ import { TrackingProvider } from "./tracking/TrackingProvider";
 export function App() {
   return (
     <Routes>
-      <Route path="/" element={<Navigate to="/shop" replace />} />
+      <Route path="/" element={<Navigate to="/console/story" replace />} />
       <Route
         path="/shop"
         element={
@@ -47,6 +48,7 @@ export function App() {
       </Route>
       <Route path="/console" element={<ConsoleLayout />}>
         <Route index element={<ConsoleHome />} />
+        <Route path="story" element={<StoryPage />} />
         <Route path="decisions" element={<DecisionsHome />} />
         <Route path="assistant" element={<AssistantPage />} />
         <Route path="decisions/:name" element={<DecisionPage />} />

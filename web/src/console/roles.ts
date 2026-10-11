@@ -1,8 +1,9 @@
 import { useCallback, useState } from "react";
 
-export type Page = "decisions" | "assistant" | "metrics" | "library" | "reports" | "checks" | "diff" | "events" | "models";
+export type Page = "story" | "decisions" | "assistant" | "metrics" | "library" | "reports" | "checks" | "diff" | "events" | "models";
 
 export const PAGE_LABEL: Record<Page, string> = {
+  story: "為什麼",
   decisions: "決策",
   assistant: "AI 提案",
   metrics: "指標說明",

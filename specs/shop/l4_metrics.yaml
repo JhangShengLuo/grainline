@@ -59,26 +59,96 @@ metrics:
     measure: {agg: count_distinct, column: person_id}
     additivity: non_additive
 
-  orders:
-    label: 訂單數
+  # ---------- 訂單（以後端訂單主檔為準；前端回報的只用來對帳）----------
+
+  orders_created:
+    label: 建立的訂單數
+    description: 後端建立的所有訂單（含之後取消、退款的）
     model: fct_orders
-    time_column: ts
+    time_column: created_at
     measure: {agg: count}
     additivity: additive
 
+  orders:
+    label: 訂單數
+    description: 後端訂單，不含已取消的
+    model: fct_orders
+    time_column: created_at
+    measure: {agg: count}
+    additivity: additive
+    filters:
+      - {column: status, op: in, value: [paid, refunded]}
+
+  refunded_orders:
+    label: 退款訂單數
+    model: fct_orders
+    time_column: created_at
+    measure: {agg: count}
+    additivity: additive
+    filters:
+      - {column: status, op: in, value: [paid, refunded]}
+      - {column: status, op: eq, value: refunded}
+
   revenue:
     label: 營收
+    description: 後端訂單的實付金額（扣折扣、含運費），不含已取消的
     model: fct_orders
-    time_column: ts
-    measure: {agg: sum, column: revenue}
+    time_column: created_at
+    measure: {agg: sum, column: total}
     additivity: additive
+    filters:
+      - {column: status, op: in, value: [paid, refunded]}
+
+  order_subtotal:
+    label: 訂單商品金額
+    description: 後端所有訂單的商品金額（未扣折扣、不含運費、含之後取消的），和前端回報的金額同一個口徑
+    model: fct_orders
+    time_column: created_at
+    measure: {agg: sum, column: subtotal}
+    additivity: additive
+
+  discount_cost:
+    label: 折扣成本
+    model: fct_orders
+    time_column: created_at
+    measure: {agg: sum, column: discount_amount}
+    additivity: additive
+    filters:
+      - {column: status, op: in, value: [paid, refunded]}
 
   buyers:
     label: 購買人數
     model: fct_orders
-    time_column: ts
+    time_column: created_at
     measure: {agg: count_distinct, column: person_id}
     additivity: non_additive
+    filters:
+      - {column: status, op: in, value: [paid, refunded]}
+
+  coupon_redemptions:
+    label: 折扣碼使用次數
+    model: fct_coupon_redemptions
+    time_column: redeemed_at
+    measure: {agg: count}
+    additivity: additive
+    filters:
+      - {column: status, op: eq, value: applied}
+
+  orders_reported:
+    label: 訂單數（前端回報）
+    description: 前端送出 order_completed 的次數；只代表前端收到付款成功，用來和後端對帳
+    model: fct_order_events
+    time_column: ts
+    measure: {agg: count}
+    additivity: additive
+
+  revenue_reported:
+    label: 訂單金額（前端回報）
+    description: 前端事件帶的金額（購物車金額，未扣折扣、不含運費）
+    model: fct_order_events
+    time_column: ts
+    measure: {agg: sum, column: revenue}
+    additivity: additive
 
   conversion_rate:
     type: ratio
@@ -92,6 +162,12 @@ metrics:
     kind: per_unit
     label: 平均訂單金額
     numerator: revenue
+    denominator: orders
+
+  refund_rate:
+    type: ratio
+    label: 退款率
+    numerator: refunded_orders
     denominator: orders
 
   web_uv:
@@ -154,6 +230,8 @@ metrics:
     time_column: ordered_at
     measure: {agg: sum, column: quantity}
     additivity: additive
+    filters:
+      - {column: order_status, op: neq, value: cancelled}
 
   unit_session_percentage:
     type: ratio
@@ -169,6 +247,8 @@ metrics:
     time_column: ordered_at
     measure: {agg: sum, column: line_revenue}
     additivity: additive
+    filters:
+      - {column: order_status, op: neq, value: cancelled}
 
   gross_margin:
     label: 毛利
@@ -176,6 +256,8 @@ metrics:
     time_column: ordered_at
     measure: {agg: sum, column: gross_margin}
     additivity: additive
+    filters:
+      - {column: order_status, op: neq, value: cancelled}
 
   margin_rate:
     type: ratio
@@ -193,18 +275,11 @@ metrics:
     filters:
       - {column: on_hand, op: eq, value: 0}
 
-  backend_orders:
-    label: 訂單數（後端）
-    model: fct_order_lines
-    time_column: ordered_at
-    measure: {agg: count_distinct, column: order_id}
-    additivity: non_additive
-
 reports:
   daily_overview:
     label: 每日總覽
     time_grain: day
-    metrics: [uv, sessions, page_views, cart_adds, orders, revenue, conversion_rate, aov]
+    metrics: [uv, sessions, page_views, cart_adds, orders, revenue, conversion_rate, aov, refund_rate]
 
   weekly_by_platform:
     label: 各平台每週表現
@@ -221,15 +296,28 @@ reports:
     label: 折扣碼成效週報
     time_grain: week
     dimensions: [coupon_code]
-    metrics: [orders, revenue]
+    metrics: [orders, revenue, discount_cost]
 
   frontend_vs_backend:
     label: 前端事件 vs 後端資料
     time_grain: day
-    metrics: [orders, backend_orders, revenue, ordered_product_sales]
+    metrics: [orders_reported, orders_created, revenue_reported, order_subtotal, orders, revenue]
 
   product_weekly:
     label: 商品每週表現
     time_grain: week
     dimensions: [product_id]
     metrics: [product_impressions, product_detail_views, product_ctr, cart_adds, add_to_cart_rate, units_ordered, unit_session_percentage, ordered_product_sales, gross_margin, margin_rate, stockout_days]
+
+# R4 對帳：前端回報的數字和後端的真實數字，差距超過 tolerance 就警告
+reconciliations:
+  - label: 訂單數：前端回報 vs 後端建立
+    reported: orders_reported
+    truth: orders_created
+    tolerance: 0.02
+    why: 每張後端建立的訂單，前端都應該回報一次；差太多代表漏記或重複記錄
+  - label: 訂單金額：前端回報 vs 後端商品金額
+    reported: revenue_reported
+    truth: order_subtotal
+    tolerance: 0.02
+    why: 前端回報的是購物車金額，應該等於後端訂單的商品金額

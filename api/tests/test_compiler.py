@@ -2,11 +2,11 @@ import duckdb
 import pytest
 
 from app.compiler import CompileError, compile_project
-from app.generator import generate_events
+from app.generator import simulate
 from app.spec import Project
 from app.warehouse import build_warehouse
 
-from .conftest import event
+from .conftest import backend_order, event, load_small, world
 
 
 def _scalar(con: duckdb.DuckDBPyConnection, sql: str) -> object:
@@ -99,14 +99,20 @@ def test_ratio_is_computed_from_period_totals(con: duckdb.DuckDBPyConnection, pr
     build_warehouse(
         con,
         project,
-        [
-            event("page_view", "2026-09-01 10:00:00", "a", page_type="home"),
-            event("page_view", "2026-09-01 11:00:00", "b", page_type="home"),
-            event("page_view", "2026-09-01 12:00:00", "c", page_type="home"),
-            event("page_view", "2026-09-01 13:00:00", "d", page_type="home"),
-            event("order_completed", "2026-09-01 10:05:00", "a", order_id="o1", revenue=1000, item_count=1),
-            event("order_completed", "2026-09-01 10:09:00", "a", order_id="o2", revenue=500, item_count=1),
-        ],
+        world(
+            [
+                event("page_view", "2026-09-01 10:00:00", "a", page_type="home"),
+                event("page_view", "2026-09-01 11:00:00", "b", page_type="home"),
+                event("page_view", "2026-09-01 12:00:00", "c", page_type="home"),
+                event("page_view", "2026-09-01 13:00:00", "d", page_type="home"),
+            ],
+            [
+                backend_order("o1", "2026-09-01 10:05:00", "a", 1000),
+                backend_order("o2", "2026-09-01 10:09:00", "a", 500),
+                # 已取消的訂單不算訂單、不算營收
+                backend_order("o3", "2026-09-01 12:30:00", "c", 800, status="cancelled"),
+            ],
+        ),
     )
     row = con.execute(
         "select uv, orders, revenue, conversion_rate, aov from rpt_daily_overview"
@@ -124,7 +130,7 @@ def test_days_without_orders_show_zero_not_null(
 
 @pytest.fixture
 def shop(con: duckdb.DuckDBPyConnection, project: Project) -> duckdb.DuckDBPyConnection:
-    build_warehouse(con, project, generate_events(project))
+    build_warehouse(con, project, simulate(project))
     return con
 
 
@@ -137,10 +143,10 @@ def test_fact_grain_is_unique(shop: duckdb.DuckDBPyConnection, project: Project)
 
 def test_report_totals_match_facts(shop: duckdb.DuckDBPyConnection) -> None:
     assert _scalar(shop, "select sum(revenue) from rpt_daily_overview") == pytest.approx(
-        _scalar(shop, "select sum(revenue) from fct_orders")
+        _scalar(shop, "select sum(total) from fct_orders where status <> 'cancelled'")
     )
     assert _scalar(shop, "select sum(orders) from rpt_daily_overview") == _scalar(
-        shop, "select count(*) from fct_orders"
+        shop, "select count(*) from fct_orders where status <> 'cancelled'"
     )
 
 
@@ -158,10 +164,10 @@ def test_weekly_uv_is_not_the_sum_of_daily_uv(shop: duckdb.DuckDBPyConnection) -
 
 
 def test_model_referencing_undeclared_property_fails_to_compile(project: Project) -> None:
-    model = project.models["fct_orders"]
+    model = project.models["fct_order_events"]
     columns = {**model.columns, "coupon": model.columns["revenue"].model_copy(update={"from_": "coupon_code"})}
     broken = project.model_copy(
-        update={"models": {**project.models, "fct_orders": model.model_copy(update={"columns": columns})}}
+        update={"models": {**project.models, "fct_order_events": model.model_copy(update={"columns": columns})}}
     )
     with pytest.raises(CompileError, match="coupon_code"):
         compile_project(broken, strict=True)
@@ -179,19 +185,21 @@ def test_report_dimension_missing_on_model_fails_to_compile(project: Project) ->
     )
     with pytest.raises(CompileError, match="page_type") as info:
         compile_project(broken, strict=True)
-    # page_type 只在 fct_page_views，fct_cart_adds 和 fct_orders 都應該被列出來
+    # page_type 只在 fct_page_views，fct_cart_adds 和 fct_orders 都應該被列出來（後端訂單也沒有 page_type）
     assert sum("page_type" in e for e in info.value.errors) >= 2
 
 
-def test_lenient_compile_skips_only_what_is_broken(project: Project) -> None:
-    names = {v.name for v in compile_project(project)}
-    # 範例規格刻意讓 fct_orders.coupon_code 斷鏈：只有用到它的報表被跳過
-    assert "fct_orders" in names and "rpt_daily_overview" in names
-    assert "rpt_promotion_weekly" not in names
+def test_lenient_compile_skips_only_what_is_broken() -> None:
+    v2 = load_small(2)
+    names = {v.name for v in compile_project(v2)}
+    # v2 沒有 product_view：只有用到它的 model 與報表被跳過，其他照常建立
+    assert "fct_order_events" in names and "rpt_daily_overview" in names
+    assert "fct_product_views" not in names and "rpt_product_weekly" not in names
 
 
 def test_broken_column_is_dropped_from_model_view(shop: duckdb.DuckDBPyConnection) -> None:
-    columns = [r[0] for r in shop.execute("select column_name from (describe fct_orders)").fetchall()]
+    # 範例規格刻意讓 fct_order_events.coupon_code 斷鏈（v1 前端沒埋）：只拿掉這一欄
+    columns = [r[0] for r in shop.execute("select column_name from (describe fct_order_events)").fetchall()]
     assert "revenue" in columns and "coupon_code" not in columns
 
 

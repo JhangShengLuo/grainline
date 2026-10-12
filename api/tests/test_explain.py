@@ -49,8 +49,11 @@ def test_other_examples_are_different_people(client: TestClient) -> None:
 def test_ratio_example_marks_numerator_and_denominator(client: TestClient) -> None:
     body = _explain(client, "conversion_rate")
     assert [p["role"] for p in body["parts"]] == ["分子", "分母"]
+    # 分母（訪客）來自前端事件，分子（購買人數）來自後端訂單：例子同時列出兩邊
     marks = {m for e in body["example"]["events"] for m in e["marks"]}
-    assert marks == {"分子", "分母"}
+    assert marks == {"分母"}
+    assert body["example"]["rows_source"].startswith("orders（分子")
+    assert body["example"]["rows"]
     assert "不是把每個人的比率平均" in body["example"]["summary"]
 
 
@@ -69,7 +72,7 @@ def test_v2_caveats_explain_tracking_timing(client: TestClient) -> None:
 
 
 def test_v2_orders_example_shows_a_duplicated_order(client: TestClient) -> None:
-    example = _explain(client, "orders", plan=2)["example"]
+    example = _explain(client, "orders_reported", plan=2)["example"]
     assert "被重複記錄" in example["summary"]
     orders = [e["properties"]["order_id"] for e in example["events"] if "算進來" in e["marks"]]
     assert len(orders) > len(set(orders))
@@ -89,7 +92,8 @@ def test_broken_metric_explains_why(client: TestClient) -> None:
 
 def test_metrics_list_has_summary_and_problem_count(client: TestClient) -> None:
     metrics = {m["name"]: m for m in client.get("/metrics", params={"plan": 2}).json()}
-    assert metrics["orders"]["problems"] >= 2
+    assert metrics["orders_reported"]["problems"] >= 2
+    assert metrics["orders"]["problems"] == 0  # 後端訂單不受埋點設計影響
     assert metrics["uv"]["problems"] == 0
     assert "daily_overview" in metrics["uv"]["reports"]
 
@@ -105,8 +109,9 @@ def test_identity_text_follows_l2(project: Project) -> None:
 def test_event_catalog_shows_usage_and_requests(client: TestClient) -> None:
     body = client.get("/events", params={"plan": 1}).json()
     events = {e["name"]: e for e in body["events"]}
-    assert events["order_completed"]["used_by"]["models"] == ["fct_orders"]
-    assert {r["name"] for r in events["order_completed"]["used_by"]["reports"]} >= {"daily_overview"}
+    assert events["order_completed"]["used_by"]["models"] == ["fct_order_events"]
+    # 前端的訂單事件現在只用來對帳
+    assert {r["name"] for r in events["order_completed"]["used_by"]["reports"]} == {"frontend_vs_backend"}
     assert events["checkout_start"]["used_by"]["metrics"] == []
     price = next(p for p in events["add_to_cart"]["properties"] if p["name"] == "price")
     assert price["from_text"] == "商品當下售價"
@@ -136,10 +141,11 @@ def test_model_catalog(client: TestClient) -> None:
     body = client.get("/models", params={"plan": 2}).json()
     assert "30 分鐘" in body["staging"]["session_text"]
     models = {m["name"]: m for m in body["models"]}
-    assert models["fct_orders"]["grain_check"]["ok"] is False
+    assert models["fct_order_events"]["grain_check"]["ok"] is False
+    assert models["fct_orders"]["grain_check"]["ok"] is True
     assert models["fct_page_views"]["grain_check"]["ok"] is True
     assert models["fct_product_views"]["broken"] and models["fct_product_views"]["sql"] is None
-    revenue = next(c for c in models["fct_orders"]["columns"] if c["name"] == "revenue")
+    revenue = next(c for c in models["fct_order_events"]["columns"] if c["name"] == "revenue")
     assert revenue["type"] == "number"
     assert revenue["origin"] == {"layer": "L1", "name": "order_completed.revenue", "detail": "number"}
     assert "select" in models["fct_orders"]["sql"]

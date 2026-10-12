@@ -3,6 +3,7 @@
 R1 可加性 / grain：不可加的指標不能從細 grain 加總到粗 grain；L3 宣告的 grain 在資料上要成立
 R2 比率母體：rate 的分子必須是分母的子集（同一個計數單位、分子篩選包含分母篩選）
 R3 血緣可達：L4 用到的每個欄位都要能追回 L1 宣告過的 property，且型別相符
+R4 業務規則與對帳：業務資料本身要符合規則（參照完整、有效期間、次數上限、金額一致），前端回報要對得上後端
 """
 
 from __future__ import annotations
@@ -14,9 +15,20 @@ import duckdb
 
 from .compiler import literal, metric_sql, where_sql
 from .lineage import Lineage, Problem, resolve
-from .spec import Filter, Project, RatioMetric, RollupMetric, SimpleMetric
+from .compiler import filter_sql
+from .spec import (
+    Filter,
+    LimitRule,
+    MatchRule,
+    Project,
+    RatioMetric,
+    ReferenceRule,
+    RollupMetric,
+    SimpleMetric,
+    WithinRule,
+)
 
-Rule = Literal["R1", "R2", "R3"]
+Rule = Literal["R1", "R2", "R3", "R4"]
 GRAIN_ZH = {"day": "日", "week": "週", "month": "月"}
 NON_ADDITIVE_AGGS = {"count_distinct", "avg", "min", "max"}
 
@@ -414,6 +426,125 @@ order by rows desc, {grain}""")
     return findings
 
 
+# ---------- R4 業務規則與對帳 ----------
+
+
+def _source_users(project: Project, source: str) -> list[str]:
+    models = [m for m, model in project.models.items() if model.table == source]
+    metrics = [n for n, m in project.metric_layer.metrics.items() if isinstance(m, SimpleMetric) and m.model in models]
+    return [f"model:{m}" for m in models] + [f"metric:{m}" for m in metrics]
+
+
+def _rule_sql(project: Project, name: str, rule: Any) -> tuple[str, str]:
+    """回傳 (找出違反的列的 SQL, 主體欄位)。"""
+    if isinstance(rule, ReferenceRule):
+        table, column = rule.to.split(".")
+        return (
+            f"select s.{rule.column} as value, count(*) as rows from src_{name} s "
+            f"where s.{rule.column} is not null "
+            f"and s.{rule.column} not in (select {column} from src_{table} where {column} is not null) "
+            f"group by 1 order by 2 desc, 1",
+            rule.column,
+        )
+    other_key = project.sources[rule.source].grain[0]
+    if isinstance(rule, WithinRule):
+        return (
+            f"select s.{rule.key} as key, count(*) as rows, "
+            f"min(cast(s.{rule.time} as date)) as first_seen, max(cast(s.{rule.time} as date)) as last_seen, "
+            f"any_value(o.{rule.start}) as {rule.start}, any_value(o.{rule.end}) as {rule.end} "
+            f"from src_{name} s join src_{rule.source} o on o.{other_key} = s.{rule.key} "
+            f"where cast(s.{rule.time} as date) < o.{rule.start} or cast(s.{rule.time} as date) > o.{rule.end} "
+            f"group by 1 order by 2 desc, 1",
+            rule.time,
+        )
+    if isinstance(rule, LimitRule):
+        groups = ", ".join(rule.group_by)
+        not_null = " and ".join(f"{g} is not null" for g in rule.group_by)
+        where = f"{not_null}" + (f" and {filter_sql(rule.filter)}" if rule.filter else "")
+        return (
+            f"with counts as (select {groups}, count(*) as used from src_{name} where {where} group by all) "
+            f"select counts.*, o.{rule.max} as allowed from counts "
+            f"join src_{rule.source} o on o.{other_key} = counts.{rule.key} "
+            f"where counts.used > o.{rule.max} order by counts.used - o.{rule.max} desc, {groups}",
+            ", ".join(rule.group_by),
+        )
+    assert isinstance(rule, MatchRule)
+    return (
+        f"with a as (select {rule.key}, sum({rule.column}) as v from src_{name} group by 1), "
+        f"b as (select {rule.key}, sum({rule.other_column}) as v from src_{rule.source} group by 1) "
+        f"select coalesce(a.{rule.key}, b.{rule.key}) as {rule.key}, coalesce(a.v, 0) as {name}_{rule.column}, "
+        f"coalesce(b.v, 0) as {rule.source}_{rule.other_column} "
+        f"from a full join b on a.{rule.key} = b.{rule.key} "
+        f"where abs(coalesce(a.v, 0) - coalesce(b.v, 0)) > 0.005 order by 1",
+        rule.column,
+    )
+
+
+_RULE_TEXT = {
+    "reference": "參照完整性",
+    "within": "有效期間",
+    "limit": "次數上限",
+    "match": "金額一致",
+}
+
+
+def _r4(project: Project, con: duckdb.DuckDBPyConnection) -> list[Finding]:
+    findings: list[Finding] = []
+    for name, source in project.sources.items():
+        for rule in source.rules:
+            sql, column = _rule_sql(project, name, rule)
+            try:
+                rows = _rows(con, sql)
+            except duckdb.Error as exc:
+                rows, error = [], str(exc)
+            else:
+                error = None
+            if not rows and error is None:
+                continue
+            count = sum(r.get("rows", 1) for r in rows)
+            summary = error or f"{count:,} 筆違反（{_RULE_TEXT[rule.type]}）：{rule.why}"
+            findings.append(Finding(
+                "R4", "error", f"rule_{rule.type}", f"source:{name}.{column}",
+                f"業務資料 {name}（{source.owner}）違反規則：{rule.why}。這是資料來源本身的問題，要回頭找擁有者。",
+                _source_users(project, name),
+                {"summary": summary, "violations": count, "rows": rows[:20], "rule": rule.model_dump()},
+            ))
+
+    for rec in project.metric_layer.reconciliations:
+        metrics = project.metric_layer.metrics
+        if not all(isinstance(metrics.get(m), SimpleMetric) for m in (rec.reported, rec.truth)):
+            continue
+        sql = (
+            f"with r as ({metric_sql(project, rec.reported, rec.grain)}), "
+            f"t as ({metric_sql(project, rec.truth, rec.grain)}) "
+            f"select coalesce(r.period, t.period) as period, coalesce(r.{rec.reported}, 0) as reported, "
+            f"coalesce(t.{rec.truth}, 0) as truth from r full join t on r.period = t.period order by 1"
+        )
+        try:
+            rows = _rows(con, sql)
+        except duckdb.Error:
+            continue
+        for r in rows:
+            r["gap"] = r["reported"] - r["truth"]
+            r["gap_pct"] = r["gap"] / r["truth"] if r["truth"] else None
+        over = [r for r in rows if r["gap_pct"] is None and r["reported"] or (r["gap_pct"] is not None and abs(r["gap_pct"]) > rec.tolerance)]
+        if not over:
+            continue
+        reported, truth = sum(r["reported"] for r in rows), sum(r["truth"] for r in rows)
+        findings.append(Finding(
+            "R4", "warning", "reconcile_gap", f"metric:{rec.reported}",
+            f"{rec.label}：{len(over)} 個期間差距超過 {rec.tolerance:.0%}。{rec.why}",
+            _reports_using(project, rec.reported),
+            {
+                "summary": f"整段期間前端回報 {reported:,.0f}、後端 {truth:,.0f}，差 {reported - truth:+,.0f}"
+                           + (f"（{(reported - truth) / truth:+.1%}）" if truth else ""),
+                "periods_over": len(over),
+                "rows": over[:20],
+            },
+        ))
+    return findings
+
+
 def check_project(
     project: Project, lineage: Lineage | None = None, con: duckdb.DuckDBPyConnection | None = None
 ) -> list[Finding]:
@@ -426,6 +557,7 @@ def check_project(
     for finding in findings:
         _attach_evidence(con, project, lineage, finding)
     findings += _grain_findings(con, project, lineage)
+    findings += _r4(project, con)
 
     # 規格上沒問題的 rate，也實際量一次分子有沒有跑出分母
     flagged = {f.subject for f in findings if f.rule == "R2"}

@@ -25,7 +25,8 @@ def client(spec_dir: Path, data_dir: Path) -> TestClient:
 
 def test_checks_returns_findings_with_evidence(client: TestClient) -> None:
     body = client.get("/checks").json()
-    assert body["summary"]["error"] == 3
+    # 三個刻意的衝突（R1–R3），加上後端 bug 造成的 R4 違規
+    assert {f["rule"] for f in body["findings"] if f["severity"] == "error"} == {"R1", "R2", "R3", "R4"}
     assert body["generated_events"] > 0
     for finding in body["findings"]:
         assert finding["evidence"]["summary"]
@@ -55,14 +56,19 @@ def test_report_rows_and_broken_report(client: TestClient) -> None:
     assert len(body["rows"]) == 28
     assert body["rows"][0]["period"] == "2026-09-01"
     assert body["metrics"][0] == {"name": "uv", "label": "不重複訪客", "additivity": "non_additive", "format": "number"}
-    broken = client.get("/reports/promotion_weekly")
+    # 折扣碼報表改用後端資料，v1 就能建立；v2 沒有 product_view，商品報表建不起來
+    assert client.get("/reports/promotion_weekly").status_code == 200
+    broken = client.get("/reports/product_weekly", params={"plan": 2})
     assert broken.status_code == 409
-    assert "coupon_code" in broken.json()["detail"]["reason"]
+    assert "product_view" in broken.json()["detail"]["reason"]
 
 
 def test_editing_specs_rebuilds_on_next_request(client: TestClient, spec_dir: Path) -> None:
-    assert client.get("/checks").json()["summary"]["error"] == 3
-    # 前端補上 coupon_code 埋點 → R3 衝突消失，報表可以建立
+    def coupon_conflict() -> bool:
+        return any(f["subject"] == "fct_order_events.coupon_code" for f in client.get("/checks").json()["findings"])
+
+    assert coupon_conflict()
+    # 前端補上 coupon_code 埋點 → R3 衝突消失
     l1 = spec_dir / "tracking_plans" / "v1.yaml"
     l1.write_text(
         l1.read_text(encoding="utf-8").replace(
@@ -72,9 +78,7 @@ def test_editing_specs_rebuilds_on_next_request(client: TestClient, spec_dir: Pa
         ),
         encoding="utf-8",
     )
-    body = client.get("/checks").json()
-    assert body["summary"]["error"] == 2
-    assert client.get("/reports/promotion_weekly").status_code == 200
+    assert not coupon_conflict()
 
 
 def test_invalid_spec_returns_422(client: TestClient, spec_dir: Path) -> None:

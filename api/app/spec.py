@@ -157,12 +157,79 @@ class SourceIdentity(Spec):
     user_id: Ident | None = None
 
 
+Scalar = str | int | float | bool
+
+
+class Filter(Spec):
+    column: Ident
+    op: Literal["eq", "neq", "in", "not_in", "gt", "gte", "lt", "lte"]
+    value: Scalar | list[Scalar]
+
+    @model_validator(mode="after")
+    def _value_shape(self) -> Filter:
+        if (self.op in ("in", "not_in")) != isinstance(self.value, list):
+            raise ValueError("op in / not_in 的 value 必須是 list，其他 op 必須是單一值")
+        return self
+
+
+
+# R4 業務規則：寫在業務資料合約裡，檢查資料本身是否符合業務規則與參照完整性
+
+
+class ReferenceRule(Spec):
+    """column 的每個值（NULL 除外）都要在另一個來源的欄位裡找得到。"""
+
+    type: Literal["reference"]
+    column: Ident
+    to: str  # "<來源>.<欄位>"
+    why: str
+
+
+class WithinRule(Spec):
+    """time 必須落在另一個來源（用 key 對上它的 grain）的 start～end 之間（含頭尾，以日期比較）。"""
+
+    type: Literal["within"]
+    time: Ident
+    key: Ident
+    source: Ident
+    start: Ident
+    end: Ident
+    why: str
+
+
+class LimitRule(Spec):
+    """依 group_by 分組計數，不能超過另一個來源（用 key 對上）的 max 欄位；可以只算符合 filter 的列。"""
+
+    type: Literal["limit"]
+    group_by: list[Ident] = Field(min_length=1)
+    key: Ident
+    source: Ident
+    max: Ident
+    filter: Filter | None = None
+    why: str
+
+
+class MatchRule(Spec):
+    """依 key 加總後，column 要等於另一個來源的 other_column（例如訂單折扣 = 使用紀錄的折扣）。"""
+
+    type: Literal["match"]
+    key: Ident
+    column: Ident
+    source: Ident
+    other_column: Ident
+    why: str
+
+
+SourceRule = Annotated[ReferenceRule | WithinRule | LimitRule | MatchRule, Field(discriminator="type")]
+
+
 class Source(Spec):
     owner: str
     description: str = ""
     grain: list[Ident] = Field(min_length=1)
     columns: dict[Ident, SourceColumn] = Field(min_length=1)
     identity: SourceIdentity | None = None
+    rules: list[SourceRule] = []
 
     @model_validator(mode="after")
     def _columns(self) -> Source:
@@ -324,21 +391,6 @@ class Model(Spec):
 
 # ---------- L4 指標與報表 ----------
 
-Scalar = str | int | float | bool
-
-
-class Filter(Spec):
-    column: Ident
-    op: Literal["eq", "neq", "in", "not_in", "gt", "gte", "lt", "lte"]
-    value: Scalar | list[Scalar]
-
-    @model_validator(mode="after")
-    def _value_shape(self) -> Filter:
-        if (self.op in ("in", "not_in")) != isinstance(self.value, list):
-            raise ValueError("op in / not_in 的 value 必須是 list，其他 op 必須是單一值")
-        return self
-
-
 class Measure(Spec):
     agg: Literal["count", "count_distinct", "sum", "avg", "min", "max"]
     column: Ident | None = None
@@ -409,9 +461,21 @@ class Report(Spec):
     metrics: list[Ident] = Field(min_length=1)
 
 
+class Reconciliation(Spec):
+    """對帳（R4）：前端回報的數字和後端的真實數字，差距不能超過 tolerance（比例）。"""
+
+    label: str
+    reported: Ident  # 前端事件算出的指標
+    truth: Ident     # 後端資料算出的指標
+    grain: Literal["day", "week", "month"] = "day"
+    tolerance: float = Field(0.02, ge=0)
+    why: str
+
+
 class MetricLayer(Spec):
     metrics: dict[Ident, Metric] = Field(min_length=1)
     reports: dict[Ident, Report] = {}
+    reconciliations: list[Reconciliation] = []
 
 
 # ---------- L5 決策劇本 ----------
@@ -521,10 +585,32 @@ class Behavior(Spec):
     """和埋點無關、真實世界會發生的事；不同的埋點設計會「看到」不同的部分。"""
 
     add_to_cart_api_success: float = Field(1.0, ge=0, le=1)
-    coupon_rate: float = Field(0.0, ge=0, le=1)
-    coupon_codes: list[str] = []
+    coupon_rate: float = Field(0.0, ge=0, le=1)  # 結帳時嘗試輸入折扣碼的比例
     complete_page_reached: float = Field(1.0, ge=0, le=1)
     complete_page_reload_rate: float = Field(0.0, ge=0, le=1)
+    cancel_rate: float = Field(0.0, ge=0, le=1)   # 付款後幾天內取消
+    refund_rate: float = Field(0.0, ge=0, le=1)   # 出貨後退貨退款
+    free_shipping_over: float = Field(999, ge=0)
+    shipping_fee: float = Field(60, ge=0)
+
+
+class Coupon(Spec):
+    code: str
+    campaign: str
+    discount_type: Literal["percent", "fixed"]
+    value: float = Field(gt=0)
+    min_spend: float = Field(0, ge=0)
+    valid_from: date
+    valid_until: date
+    usage_limit: int = Field(gt=0)
+    per_user_limit: int = Field(gt=0)
+
+
+class BackendBugs(Spec):
+    """刻意模擬的後端 bug，用來示範 R4 業務規則抓得到什麼。"""
+
+    accept_expired_coupon: float = Field(0.0, ge=0, le=1)  # 過期的折扣碼有時候還是被接受
+    skip_per_user_limit: float = Field(0.0, ge=0, le=1)    # 每人使用上限有時候沒檢查
 
 
 class Simulation(Spec):
@@ -536,13 +622,15 @@ class Simulation(Spec):
     market: Market = Market()
     login: Login | None = None
     behavior: Behavior = Behavior()
+    coupons: list[Coupon] = []
+    backend_bugs: BackendBugs = BackendBugs()
     funnel: list[FunnelStep] = Field(min_length=1)
     personas: dict[Ident, Persona] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _coupons(self) -> Simulation:
-        if self.behavior.coupon_rate > 0 and not self.behavior.coupon_codes:
-            raise ValueError("coupon_rate > 0 時需要 coupon_codes")
+        if self.behavior.coupon_rate > 0 and not self.coupons:
+            raise ValueError("coupon_rate > 0 時需要 coupons")
         return self
 
 
@@ -599,6 +687,10 @@ class Project(Spec):
                 f"L4 report '{name}': metric '{m}' 不存在" for m in report.metrics if m not in metrics
             ]
 
+        errors += self._rule_references()
+        for i, rec in enumerate(self.metric_layer.reconciliations):
+            errors += [f"L4 對帳 #{i + 1}: metric '{m}' 不存在" for m in (rec.reported, rec.truth) if m not in metrics]
+
         funnel_actions = {step.action for step in self.simulation.funnel}
         for name, persona in self.simulation.personas.items():
             errors += [
@@ -610,6 +702,49 @@ class Project(Spec):
         if errors:
             raise ValueError("\n".join(errors))
         return self
+
+    def _rule_references(self) -> list[str]:
+        """R4 規則引用的來源與欄位都要存在。"""
+        errors: list[str] = []
+        for name, source in self.sources.items():
+            def own(col: str, rule: str) -> None:
+                if col not in source.columns:
+                    errors.append(f"業務資料 {name} 的 {rule} 規則：欄位 '{col}' 不存在")
+
+            def other(table: str, cols: list[str], rule: str) -> None:
+                if table not in self.sources:
+                    errors.append(f"業務資料 {name} 的 {rule} 規則：來源 '{table}' 不存在")
+                    return
+                errors.extend(f"業務資料 {name} 的 {rule} 規則：{table} 沒有欄位 '{c}'"
+                              for c in cols if c not in self.sources[table].columns)
+
+            for rule in source.rules:
+                if isinstance(rule, ReferenceRule):
+                    own(rule.column, "reference")
+                    if _source_column(self.sources, rule.to) is None:
+                        errors.append(f"業務資料 {name} 的 reference 規則：'{rule.to}' 不是存在的「來源.欄位」")
+                elif isinstance(rule, WithinRule):
+                    own(rule.time, "within")
+                    own(rule.key, "within")
+                    other(rule.source, [rule.start, rule.end], "within")
+                elif isinstance(rule, LimitRule):
+                    for c in [*rule.group_by, *( [rule.filter.column] if rule.filter else [])]:
+                        own(c, "limit")
+                    if rule.key not in rule.group_by:
+                        errors.append(f"業務資料 {name} 的 limit 規則：key '{rule.key}' 必須在 group_by 裡")
+                    other(rule.source, [rule.max], "limit")
+                else:
+                    own(rule.key, "match")
+                    own(rule.column, "match")
+                    other(rule.source, [rule.key, rule.other_column], "match")
+        return errors
+
+
+def _source_column(sources: dict[str, Source], ref: str) -> tuple[str, str] | None:
+    table, _, column = ref.partition(".")
+    if table in sources and column in sources[table].columns:
+        return table, column
+    return None
 
 
 def model_order(models: dict[str, Model]) -> list[str]:

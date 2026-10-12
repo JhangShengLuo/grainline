@@ -206,7 +206,7 @@ def create_app(
     # ---------- 檢查、指標、報表 ----------
 
     @app.get("/checks")
-    def checks(rule: str | None = Query(None, pattern="^R[123]$"), plan: int | None = PlanParam) -> dict[str, Any]:
+    def checks(rule: str | None = Query(None, pattern="^R[1-4]$"), plan: int | None = PlanParam) -> dict[str, Any]:
         with workspace.lock:
             state = workspace.state(plan)
             findings = [f.to_dict() for f in state.findings() if rule is None or f.rule == rule]

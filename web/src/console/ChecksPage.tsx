@@ -5,6 +5,7 @@ export const RULES = {
   R1: "可加性 / grain",
   R2: "比率母體",
   R3: "血緣可達",
+  R4: "業務規則與對帳",
 } as const;
 
 function EvidenceTable({ rows }: { rows: Record<string, unknown>[] }) {

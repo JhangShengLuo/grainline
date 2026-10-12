@@ -89,7 +89,8 @@ def test_requirements_trace_down_to_page_behaviors(v1: tuple[Project, duckdb.Duc
     assert req["ready"]
     layers = req["layers"]
     assert {"fct_product_impressions", "fct_order_lines", "dim_products"} <= set(layers["models"])
-    assert {s["source"] for s in layers["sources"]} == {"order_lines", "products", "inventory_daily"}
+    # 訂單明細透過 lookup 帶入後端訂單狀態（排除已取消）
+    assert {s["source"] for s in layers["sources"]} == {"order_lines", "products", "inventory_daily", "orders"}
     where = {m["moment"]: m["where"] for m in layers["moments"]}
     assert where["product_impression"] == "首頁精選、分類頁的商品卡片"
     assert where["product_detail_load"] == "商品頁"

@@ -201,7 +201,7 @@ def _caveats(project: Project, findings: list[Finding], name: str) -> list[dict[
 
     related = {f"metric:{n}" for n in [name, *simples]}
     models = {metrics[s].model for s in simples if isinstance(metrics[s], SimpleMetric)}
-    # 只算這個指標真的用到的欄位：例如營收用不到 fct_orders.coupon_code，那個欄位斷掉不影響營收
+    # 只算這個指標真的用到的欄位：例如營收用不到 fct_order_events.coupon_code，那個欄位斷掉不影響營收
     used_columns = set()
     for s in simples:
         m = metrics[s]
@@ -319,6 +319,16 @@ def _duplicates(con: duckdb.DuckDBPyConnection, project: Project, metric: Simple
     return n
 
 
+def _table_rows(con: duckdb.DuckDBPyConnection, metric: SimpleMetric, person: str, day: Any) -> list[dict[str, Any]]:
+    """這個人當天在這個指標的後端資料列（符合指標篩選的）。"""
+    return [
+        {k: (str(v) if not isinstance(v, int | float | str | type(None)) else v) for k, v in r.items()}
+        for r in _rows(con, f"select * exclude (person_id) from {metric.model} where person_id = ? "
+                            f"and cast({metric.time_column} as date) = ?{_conditions(metric)} limit 20",
+                       [person, day])
+    ]
+
+
 def _period_value(con: duckdb.DuckDBPyConnection, project: Project, name: str, grain: str, period: Any) -> float | None:
     row = con.execute(
         f"select {name} from (\n{metric_sql(project, name, grain)}\n) where period = cast(date_trunc('{grain}', ?::date) as date)",
@@ -372,12 +382,7 @@ def _example(project: Project, lineage: Lineage, con: duckdb.DuckDBPyConnection,
         example = {"person_id": person, "period": str(day), "grain": "day", "events": events,
                    "summary": summary, "candidates": len(people), "index": index % len(people)}
         if project.models[metric.model].table is not None:
-            example["rows"] = [
-                {k: (str(v) if not isinstance(v, int | float | str | type(None)) else v) for k, v in r.items()}
-                for r in _rows(con, f"select * exclude (person_id) from {metric.model} where person_id = ? "
-                                    f"and cast({metric.time_column} as date) = ?{_conditions(metric)} limit 20",
-                               [person, day])
-            ]
+            example["rows"] = _table_rows(con, metric, person, day)
             example["rows_source"] = project.models[metric.model].table
         return example
 
@@ -405,8 +410,15 @@ def _example(project: Project, lineage: Lineage, con: duckdb.DuckDBPyConnection,
         )
         if d_value == 0:
             summary += " ⚠ 這個人在分子裡，卻不在同一天的分母裡：分子不是分母的子集。"
-        return {"person_id": person, "period": str(day), "grain": "day", "events": events,
-                "summary": summary, "candidates": len(people), "index": index % len(people)}
+        example = {"person_id": person, "period": str(day), "grain": "day", "events": events,
+                   "summary": summary, "candidates": len(people), "index": index % len(people)}
+        # 分子或分母來自後端業務資料時，列出這個人當天的資料列（不是前端事件）
+        for role, part in (("分子", num), ("分母", den)):
+            if project.models[part.model].table is not None:
+                example["rows"] = _table_rows(con, part, person, day)
+                example["rows_source"] = f"{project.models[part.model].table}（{role}：{part.label}）"
+                break
+        return example
 
     assert isinstance(metric, RollupMetric)
     of = metrics[metric.of]
@@ -644,6 +656,7 @@ def model_catalog(project: Project, lineage: Lineage, findings: list[Finding], v
             "rows": rows,
             "columns": [{"name": c, "type": col.type, "description": col.description} for c, col in source.columns.items()],
             "identity": source.identity.model_dump() if source.identity else None,
+            "rules": [{"type": r.type, "why": r.why} for r in source.rules],
             "grain_check": {
                 "ok": grain is None,
                 "summary": grain.evidence["summary"] if grain and grain.evidence else "grain 在資料上成立：沒有重複。",

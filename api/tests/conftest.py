@@ -48,6 +48,23 @@ def con() -> Iterator[duckdb.DuckDBPyConnection]:
         yield connection
 
 
+def backend_order(order_id: str, created_at: str, anonymous_id: str, total: float, status: str = "paid",
+                  user_id: str | None = None, platform: str = "web") -> dict[str, Any]:
+    """手工的後端訂單（訂單主檔一列）。"""
+    return {
+        "order_id": order_id, "anonymous_id": anonymous_id, "user_id": user_id, "platform": platform,
+        "status": status, "item_count": 1, "subtotal": total, "discount_amount": 0.0, "shipping_fee": 0.0,
+        "total": total, "coupon_code": None, "created_at": created_at,
+    }
+
+
+def world(events: list[dict[str, Any]], orders: list[dict[str, Any]] | None = None) -> Any:
+    """手工事件加上手工的後端訂單。"""
+    from app.generator import World
+
+    return World(events=events, tables={"orders": orders or []}, truth=[])
+
+
 def event(
     name: str,
     timestamp: str,

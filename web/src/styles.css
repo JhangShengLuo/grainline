@@ -324,3 +324,4 @@ a.chip-code { text-decoration: none; display: inline-block; margin-bottom: 0.2re
 .impact { margin-top: 0.3rem; font-size: 0.82rem; color: var(--warning-text); background: var(--warning-bg); border-radius: 6px; padding: 0.2rem 0.45rem; }
 .story-picks { list-style: none; padding: 0; margin: 0.5rem 0 0; font-size: 0.88rem; columns: 2; }
 .story-picks li.hit { color: var(--success); font-weight: 600; }
+.rules { list-style: none; padding: 0; margin: 0.3rem 0; display: flex; flex-direction: column; gap: 0.2rem; }

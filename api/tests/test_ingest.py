@@ -24,8 +24,9 @@ def _event(name: str, event_id: str, **properties: Any) -> dict[str, Any]:
 
 
 def _today_orders(client: TestClient) -> int:
-    rows = client.get("/reports/daily_overview").json()["rows"]
-    return next((r["orders"] for r in rows if r["period"] == "2026-10-07"), 0)
+    """前端回報的訂單數：demo 商店送來的 order_completed 事件。"""
+    rows = client.get("/reports/frontend_vs_backend").json()["rows"]
+    return next((r["orders_reported"] for r in rows if r["period"] == "2026-10-07"), 0)
 
 
 # ---------- 和 L1 比對 ----------
@@ -133,17 +134,15 @@ def test_clear_live_events(client: TestClient) -> None:
 
 
 def test_live_events_refresh_check_evidence(client: TestClient) -> None:
-    def outside() -> int:
-        findings = client.get("/checks", params={"rule": "R2"}).json()["findings"]
-        return next(f for f in findings if f["subject"] == "metric:web_conversion_rate")["evidence"]["outside"]
+    def reconcile_gaps() -> int:
+        findings = client.get("/checks", params={"rule": "R4"}).json()["findings"]
+        gap = next((f for f in findings if f["subject"] == "metric:orders_reported"), None)
+        return gap["evidence"]["periods_over"] if gap else 0
 
-    before = outside()
-    # app 上的買家：在 web 轉換率的分子裡，但不在 web UV 分母裡
-    app_order = _event("order_completed", "e5", order_id="o-app", revenue=100, item_count=1)
-    app_order["properties"]["platform"] = "app"
-    app_order["anonymous_id"] = "anon-live-app"
-    client.post("/ingest", json={"events": [app_order]})
-    assert outside() == before + 1
+    before = reconcile_gaps()
+    # 前端回報了一張訂單，但後端沒有這張訂單：對帳馬上多一個有落差的期間
+    client.post("/ingest", json={"events": [_event("order_completed", "e5", order_id="o-ghost", revenue=100, item_count=1)]})
+    assert reconcile_gaps() == before + 1
 
 
 def test_malformed_envelope_is_rejected(client: TestClient) -> None:

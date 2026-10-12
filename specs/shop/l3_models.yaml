@@ -51,9 +51,9 @@ fct_cart_adds:
     price: {from: price}
     quantity: {from: quantity}
 
-fct_orders:
+fct_order_events:
   kind: fact
-  description: 每筆訂單一列
+  description: 每個前端回報的訂單事件一列（只代表前端收到付款成功；訂單以後端為準）
   source: order_completed
   grain: [order_id]
   columns:
@@ -122,6 +122,7 @@ fct_order_lines:
     ordered_at: {from: ordered_at}
     person_id: {from: person_id}
     unit_cost: {lookup: {model: dim_products, column: cost, by: product_id}}
+    order_status: {lookup: {model: fct_orders, column: status, by: order_id}}
     gross_margin: {expr: "line_revenue - quantity * unit_cost"}
 
 dim_products:
@@ -147,3 +148,50 @@ fct_inventory_daily:
     date: {from: date}
     product_id: {from: product_id}
     on_hand: {from: on_hand}
+
+fct_orders:
+  kind: fact
+  description: 每張訂單一列（後端訂單主檔）
+  table: orders
+  grain: [order_id]
+  columns:
+    order_id: {from: order_id}
+    person_id: {from: person_id}
+    platform: {from: platform}
+    status: {from: status}
+    item_count: {from: item_count}
+    subtotal: {from: subtotal}
+    discount_amount: {from: discount_amount}
+    shipping_fee: {from: shipping_fee}
+    total: {from: total}
+    coupon_code: {from: coupon_code}
+    created_at: {from: created_at}
+
+dim_coupons:
+  kind: fact
+  description: 每個折扣碼一列（折扣碼主檔）
+  table: coupons
+  grain: [coupon_code]
+  columns:
+    coupon_code: {from: coupon_code}
+    campaign: {from: campaign}
+    discount_type: {from: discount_type}
+    value: {from: value}
+    valid_from: {from: valid_from}
+    valid_until: {from: valid_until}
+    usage_limit: {from: usage_limit}
+
+fct_coupon_redemptions:
+  kind: fact
+  description: 每次使用折扣碼一列（後端）
+  table: coupon_redemptions
+  grain: [redemption_id]
+  columns:
+    redemption_id: {from: redemption_id}
+    coupon_code: {from: coupon_code}
+    order_id: {from: order_id}
+    person_id: {from: person_id}
+    redeemed_at: {from: redeemed_at}
+    discount_amount: {from: discount_amount}
+    status: {from: status}
+    campaign: {lookup: {model: dim_coupons, column: campaign, by: coupon_code}}

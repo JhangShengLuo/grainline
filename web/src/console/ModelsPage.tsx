@@ -34,8 +34,11 @@ interface SourceInfo {
   rows: number;
   columns: { name: string; type: string; description: string }[];
   identity: { anonymous_id: string | null; user_id: string | null } | null;
+  rules: { type: string; why: string }[];
   grain_check: { ok: boolean; summary: string };
 }
+
+const RULE_LABEL: Record<string, string> = { reference: "參照完整", within: "有效期間", limit: "次數上限", match: "金額一致" };
 
 interface Catalog {
   sources: SourceInfo[];
@@ -63,7 +66,10 @@ export function ModelsPage() {
       <p className="muted">L2 與 L3 都是 view，建在不可變的 raw_events 上，查詢時才計算；改了 YAML 只要重新編譯，不需要 backfill。</p>
 
       <h2>L1 業務資料來源</h2>
-      <p className="muted small">不是前端事件，由各系統的擁有者提供。銷量、營收、成本、庫存的真實來源都在這裡。</p>
+      <p className="muted small">
+        不是前端事件，由各系統的擁有者提供。訂單、營收、折扣、庫存的真實來源都在這裡；R4 規則檢查資料本身有沒有違反業務規則，違規結果在
+        「相容性檢查」頁。
+      </p>
       {data.sources.map((src) => (
         <section key={src.name} className={`finding ${src.grain_check.ok ? "" : "error"}`}>
           <header>
@@ -79,6 +85,13 @@ export function ModelsPage() {
           <p className={`small ${src.grain_check.ok ? "success" : "warning-text"}`}>
             {src.grain_check.ok ? "✓" : "✕"} {src.grain_check.summary}
           </p>
+          {src.rules.length > 0 && (
+            <ul className="small rules">
+              {src.rules.map((r, i) => (
+                <li key={i}><span className="tag neutral">R4 {RULE_LABEL[r.type] ?? r.type}</span> {r.why}</li>
+              ))}
+            </ul>
+          )}
           <details>
             <summary>欄位（{src.columns.length}）</summary>
             <div className="table-scroll">

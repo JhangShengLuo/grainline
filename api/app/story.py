@@ -86,7 +86,7 @@ def build_story(current: Any, proposal: Any, name: str = "potential_products") -
                            f"（{definitions['meeting']['value']:.1%} vs {definitions['bi_spec']['value']:.1%}），沒有人發現。"},
                 {"week": 3, "who": "前端", "what": "排期。為了好實作：加購改成點擊就送、訂單改在成功頁送、商品瀏覽併進 page_view。",
                  "doc": "埋點文件 v2（前端提案）",
-                 "impact": f"加購次數灌水 {pct(metrics['cart_adds']):+.0%}；訂單數 {pct(metrics['orders']):+.0%}"
+                 "impact": f"加購次數灌水 {pct(metrics['cart_adds']):+.0%}；前端回報的訂單數 {pct(metrics['orders_reported']):+.0%}"
                            f"（沒等到成功頁的漏記、重新整理的重複）；商品頁瀏覽數直接消失。"},
                 {"week": 5, "who": "DE", "what": "建表。發現訂單編號重複、商品漏斗報表做不出來，回頭開會。",
                  "impact": "需要補埋：" + "；".join(i for items in blocked["missing_by_owner"].values() for i in items)},
@@ -106,7 +106,8 @@ def build_story(current: Any, proposal: Any, name: str = "potential_products") -
                  "seconds": timings["decide"]},
                 {"who": "工具", "what": f"檢查前端提案（v{proposal.project.tracking_plan.version}）：" +
                  ("劇本跑不了，缺 " + "、".join(i for items in blocked["missing_by_owner"].values() for i in items) if not blocked["ready"] else "可以執行") +
-                 f"；加購灌水 {pct(metrics['cart_adds']):+.0%}、訂單 {pct(metrics['orders']):+.0%}。自動產生補齊的提案。",
+                 f"；加購灌水 {pct(metrics['cart_adds']):+.0%}、前端回報的訂單 {pct(metrics['orders_reported']):+.0%}"
+                 f"（後端訂單不受影響）。自動產生補齊的提案。",
                  "seconds": timings["diff"]},
                 {"who": "工具", "what": f"在合成資料上跑劇本並用真相驗證：選中 {len(evaluation['playbook']['hits'])} / {evaluation['k']}。",
                  "seconds": timings["evaluate"]},

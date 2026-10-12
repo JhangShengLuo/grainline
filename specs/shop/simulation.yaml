@@ -10,7 +10,9 @@
 #   add_to_cart   → 每個看過的商品依真實轉換傾向決定要不要加購：add_to_cart_click，
 #                   有庫存且 API 成功的話再 add_to_cart_success
 #   checkout      → page_load(checkout)、checkout_load
-#   purchase      → 後端寫入訂單明細、扣庫存；payment_success，到達成功頁的話 order_complete_page_load（可能重新整理再一次）
+#   purchase      → 後端先建立訂單（驗證折扣碼、算折扣與運費、寫入訂單主檔與明細、扣庫存），
+#                   然後 payment_success，到達成功頁的話 order_complete_page_load（可能重新整理再一次）；
+#                   之後訂單可能取消或退款
 # 有帳號的人在第一步之後可能登入 → login_success
 #
 # 每個 visitor 依 persona 權重抽樣；session 數 ~ Poisson(sessions_per_week × days / 7)
@@ -49,10 +51,25 @@ login:
 # 和埋點無關、真實世界會發生的事
 behavior:
   add_to_cart_api_success: 0.9      # 加入購物車 API 有 10% 會失敗（庫存不足、逾時）
-  coupon_rate: 0.3                  # 30% 的訂單用了折扣碼
-  coupon_codes: [FALL10, VIP200, APP50]
+  coupon_rate: 0.35                 # 35% 的人結帳時輸入折扣碼（後端驗證不過就不折）
   complete_page_reached: 0.92       # 8% 的人付款成功後沒等到成功頁就離開
   complete_page_reload_rate: 0.06   # 6% 的人在成功頁重新整理
+  cancel_rate: 0.03                 # 3% 的訂單在兩天內取消
+  refund_rate: 0.04                 # 4% 的訂單出貨後退款
+  free_shipping_over: 999
+  shipping_fee: 60
+
+# 折扣碼（後端的折扣碼主檔由這裡產生）；SUMMER15 在 9/7 就過期了
+coupons:
+  - {code: FALL10, campaign: 秋季活動, discount_type: percent, value: 10, min_spend: 0, valid_from: 2026-09-01, valid_until: 2026-09-30, usage_limit: 400, per_user_limit: 2}
+  - {code: VIP200, campaign: 會員專屬, discount_type: fixed, value: 200, min_spend: 1500, valid_from: 2026-08-01, valid_until: 2026-12-31, usage_limit: 60, per_user_limit: 1}
+  - {code: APP50, campaign: App 下載, discount_type: fixed, value: 50, min_spend: 500, valid_from: 2026-09-01, valid_until: 2026-10-31, usage_limit: 1000, per_user_limit: 1}
+  - {code: SUMMER15, campaign: 夏季活動, discount_type: percent, value: 15, min_spend: 0, valid_from: 2026-07-01, valid_until: 2026-09-07, usage_limit: 500, per_user_limit: 2}
+
+# 刻意模擬的後端 bug，用來示範 R4 業務規則抓得到什麼
+backend_bugs:
+  accept_expired_coupon: 0.6        # 過期的折扣碼有 60% 的機會還是被接受
+  skip_per_user_limit: 0.5          # 每人使用上限有一半的時候沒檢查
 
 funnel:
   - action: view_home

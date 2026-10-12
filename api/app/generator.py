@@ -185,6 +185,10 @@ class _Generator:
         self.fake_rng = random.Random(self.sim.seed + 1)
         self.stock = {p.id: p.initial_stock for p in self.products}
         self.order_lines: list[dict[str, Any]] = []
+        self.orders: list[dict[str, Any]] = []
+        self.redemptions: list[dict[str, Any]] = []
+        self.coupon_usage: dict[str, int] = {}
+        self.user_coupon_usage: dict[tuple[str, str], int] = {}
         self.inventory: list[dict[str, Any]] = []
         self.impressions = {p.id: 0 for p in self.products}
         self._snapshot_day = 0
@@ -290,7 +294,14 @@ class _Generator:
         lines.sort(key=lambda r: (r["ordered_at"], r["order_id"], r["line_no"]))
         return World(
             events=events,
-            tables={"products": self.product_rows(), "order_lines": lines, "inventory_daily": self.inventory},
+            tables={
+                "products": self.product_rows(),
+                "order_lines": lines,
+                "inventory_daily": self.inventory,
+                "orders": self._as_of(self.orders, "created_at", end),
+                "coupons": self.coupon_rows(),
+                "coupon_redemptions": self._as_of(self.redemptions, "redeemed_at", end),
+            },
             truth=self._truth(),
         )
 
@@ -329,8 +340,45 @@ class _Generator:
             if name != "product_impression":  # 同一個畫面上的曝光是同時發生的
                 clock[0] += timedelta(seconds=rng.randint(5, 120))
 
-        def backend_order() -> None:
-            """後端建立訂單：寫入訂單明細、扣庫存。和前端埋點無關。"""
+        def backend_order(discount: float) -> None:
+            """後端建立訂單：寫入訂單主檔、明細、折扣碼使用紀錄，扣庫存。和前端埋點無關。"""
+            behavior = self.behavior
+            created = clock[0]
+            subtotal = round(sum(p.price * q for p, q in ctx.cart), 2)
+            shipping = 0.0 if subtotal >= behavior.free_shipping_over else behavior.shipping_fee
+            # 訂單之後的狀態：幾天內取消，或出貨後退款
+            roll = rng.random()
+            cancelled_at = refunded_at = None
+            if roll < behavior.cancel_rate:
+                cancelled_at = created + timedelta(hours=rng.uniform(1, 48))
+            elif roll < behavior.cancel_rate + behavior.refund_rate:
+                refunded_at = created + timedelta(days=rng.uniform(3, 10))
+            self.orders.append({
+                "order_id": ctx.order_id,
+                "anonymous_id": anonymous_id,
+                "user_id": user[0],
+                "platform": platform,
+                "item_count": sum(q for _, q in ctx.cart),
+                "subtotal": subtotal,
+                "discount_amount": discount,
+                "shipping_fee": shipping,
+                "total": round(subtotal - discount + shipping, 2),
+                "coupon_code": ctx.coupon_code,
+                "created_at": created.isoformat(sep=" "),
+                "cancelled_at": cancelled_at.isoformat(sep=" ") if cancelled_at else None,
+                "refunded_at": refunded_at.isoformat(sep=" ") if refunded_at else None,
+            })
+            if ctx.coupon_code:
+                self.redemptions.append({
+                    "redemption_id": f"r{rng.getrandbits(40):010x}",
+                    "coupon_code": ctx.coupon_code,
+                    "order_id": ctx.order_id,
+                    "user_id": user[0],
+                    "anonymous_id": anonymous_id,
+                    "redeemed_at": created.isoformat(sep=" "),
+                    "discount_amount": discount,
+                    "reversed_at": cancelled_at.isoformat(sep=" ") if cancelled_at else None,
+                })
             for line_no, (product, qty) in enumerate(ctx.cart, start=1):
                 self.order_lines.append({
                     "order_id": ctx.order_id,
@@ -353,8 +401,15 @@ class _Generator:
                 break
             if step.action in ("checkout", "purchase") and not ctx.cart:
                 break  # 沒有東西可以結帳
+            if step.action == "purchase":
+                # 後端先建立訂單（驗證折扣碼、算金額），前端之後才看到付款成功
+                ctx.order_id = f"o{rng.getrandbits(40):010x}"
+                ctx.coupon_code = None
+                user_key = user[0] or anonymous_id
+                discount = self._try_coupon(ctx, clock[0], user_key) if rng.random() < self.behavior.coupon_rate else 0.0
+                backend_order(discount)
             for _ in range(rng.randint(*step.repeat)):
-                self._act(step.action, ctx, moment, backend_order, clock[0])
+                self._act(step.action, ctx, moment, clock[0])
             if index == 0 and sim.login and visitor.user_id and user[0] is None \
                     and rng.random() < sim.login.rate_per_session:
                 user[0] = visitor.user_id
@@ -362,6 +417,31 @@ class _Generator:
                 ctx.login_method = rng.choice(sim.login.methods)
                 moment("login_success")
         return out, clock[0]
+
+    def _try_coupon(self, ctx: Context, clock: datetime, user_key: str) -> float:
+        """使用者在結帳時輸入折扣碼，後端驗證；接受的話設定 ctx.coupon_code 並回傳折扣金額。
+
+        刻意模擬的後端 bug：過期的折扣碼有時候還是被接受、每人使用上限有時候沒檢查。
+        """
+        rng, bugs = self.rng, self.sim.backend_bugs
+        coupon = rng.choice(self.sim.coupons)
+        today = clock.date()
+        subtotal = sum(p.price * q for p, q in ctx.cart)
+        if today < coupon.valid_from:
+            return 0.0
+        if today > coupon.valid_until and not rng.random() < bugs.accept_expired_coupon:
+            return 0.0
+        if subtotal < coupon.min_spend or self.coupon_usage.get(coupon.code, 0) >= coupon.usage_limit:
+            return 0.0
+        used = self.user_coupon_usage.get((coupon.code, user_key), 0)
+        if used >= coupon.per_user_limit and not rng.random() < bugs.skip_per_user_limit:
+            return 0.0
+        self.coupon_usage[coupon.code] = self.coupon_usage.get(coupon.code, 0) + 1
+        self.user_coupon_usage[(coupon.code, user_key)] = used + 1
+        ctx.coupon_code = coupon.code
+        if coupon.discount_type == "percent":
+            return float(round(subtotal * coupon.value / 100))
+        return float(min(coupon.value, subtotal))
 
     def _show_list(self, ctx: Context, list_name: str, products: list[ProductTruth], moment: Moment) -> None:
         for position, product in enumerate(products, start=1):
@@ -371,7 +451,7 @@ class _Generator:
             moment("product_impression")
         ctx.product = ctx.list_name = ctx.list_position = None
 
-    def _act(self, action: str, ctx: Context, moment: Moment, backend_order: Callable[[], None], clock: datetime) -> None:
+    def _act(self, action: str, ctx: Context, moment: Moment, clock: datetime) -> None:
         rng, behavior, market = self.rng, self.behavior, self.market
         day = (clock - self.start).total_seconds() / 86400
         today = int(day)
@@ -412,9 +492,7 @@ class _Generator:
             moment("page_load")
             moment("checkout_load")
         elif action == "purchase":
-            ctx.order_id = f"o{rng.getrandbits(40):010x}"
-            ctx.coupon_code = rng.choice(behavior.coupon_codes) if rng.random() < behavior.coupon_rate else None
-            backend_order()
+            # 後端建立訂單在 _session 裡做（要知道使用者與折扣碼）；這裡是付款成功之後前端看到的
             moment("payment_success")
             if rng.random() < behavior.complete_page_reached:
                 moment("order_complete_page_load")
@@ -431,6 +509,41 @@ class _Generator:
         return props
 
     # ---------- 輸出 ----------
+
+    @staticmethod
+    def _as_of(rows: list[dict[str, Any]], time_key: str, end: str) -> list[dict[str, Any]]:
+        """資料快照：只留觀察期內建立的；之後才發生的取消、退款、沖銷還看不到。"""
+        out = []
+        for row in rows:
+            if row[time_key] >= end:
+                continue
+            row = dict(row)
+            for key in ("cancelled_at", "refunded_at", "reversed_at"):
+                if key in row and row[key] is not None and row[key] >= end:
+                    row[key] = None
+            if "cancelled_at" in row:
+                row["status"] = "cancelled" if row["cancelled_at"] else "refunded" if row["refunded_at"] else "paid"
+            if "reversed_at" in row:
+                row["status"] = "reversed" if row["reversed_at"] else "applied"
+            out.append(row)
+        return sorted(out, key=lambda r: (r[time_key], r.get("order_id", "")))
+
+    def coupon_rows(self) -> list[dict[str, Any]]:
+        """折扣碼主檔（業務資料，擁有者：行銷）。"""
+        return [
+            {
+                "coupon_code": c.code,
+                "campaign": c.campaign,
+                "discount_type": c.discount_type,
+                "value": c.value,
+                "min_spend": c.min_spend,
+                "valid_from": c.valid_from.isoformat(),
+                "valid_until": c.valid_until.isoformat(),
+                "usage_limit": c.usage_limit,
+                "per_user_limit": c.per_user_limit,
+            }
+            for c in self.sim.coupons
+        ]
 
     def product_rows(self) -> list[dict[str, Any]]:
         """商品目錄（業務資料）：公開的屬性，不含真相。上架日以原本期間的開始日計，不受情境影響。"""

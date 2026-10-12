@@ -39,7 +39,7 @@ def test_rejects_entity_column_without_agg(raw_specs: dict[str, Any]) -> None:
 
 
 def test_rejects_fact_column_with_agg(raw_specs: dict[str, Any]) -> None:
-    raw_specs["models"]["fct_orders"]["columns"]["revenue"]["agg"] = "sum"
+    raw_specs["models"]["fct_order_events"]["columns"]["revenue"]["agg"] = "sum"
     _assert_rejected(raw_specs, "不能有 agg")
 
 

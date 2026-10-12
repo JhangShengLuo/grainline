@@ -34,7 +34,7 @@ export interface ReportData {
 }
 
 export interface Finding {
-  rule: "R1" | "R2" | "R3";
+  rule: "R1" | "R2" | "R3" | "R4";
   severity: "error" | "warning";
   kind: string;
   subject: string;

@@ -113,12 +113,12 @@ def test_backend_data_is_the_same_under_every_tracking_plan(world: World) -> Non
 
 
 def test_frontend_orders_match_backend_only_in_v1(con: duckdb.DuckDBPyConnection, shop: duckdb.DuckDBPyConnection) -> None:
-    v1 = shop.execute("select sum(orders), sum(backend_orders) from rpt_frontend_vs_backend").fetchone()
+    v1 = shop.execute("select sum(orders_reported), sum(orders_created) from rpt_frontend_vs_backend").fetchone()
     assert v1[0] == v1[1]
     v2_project = load_small(2)
     other = duckdb.connect()
     build_warehouse(other, v2_project, simulate(v2_project))
-    v2 = other.execute("select sum(orders), sum(backend_orders) from rpt_frontend_vs_backend").fetchone()
+    v2 = other.execute("select sum(orders_reported), sum(orders_created) from rpt_frontend_vs_backend").fetchone()
     assert v2[0] != v2[1]  # 在成功頁送訂單：有人沒等到、有人重新整理
 
 

@@ -103,6 +103,40 @@ metrics:
       - metric: cart_adds
       - metric: product_detail_views
 
+  orders:
+    group: sales
+    label: 訂單數
+    definition: 後端成立的訂單（不含已取消）
+    why: 前端只能證明「收到付款成功」，訂單有沒有成立、之後有沒有取消，只有後端知道
+    reference: "Amazon Business Reports：Total Order Items（依訂單計）"
+    grain: 期間
+    needs:
+      - source: orders
+        columns: [order_id, status, created_at]
+
+  revenue:
+    group: sales
+    label: 營收
+    definition: 後端訂單的實付金額（扣折扣、含運費），不含已取消的
+    why: 和財務對得起來的營收；前端事件帶的金額通常是未扣折扣的購物車金額
+    reference: "業界常用：Net sales"
+    grain: 期間
+    needs:
+      - source: orders
+        columns: [order_id, status, total, created_at]
+
+  refund_rate:
+    group: sales
+    label: 退款率
+    definition: 退款的訂單 ÷ 成立的訂單
+    why: 賣得多但退得也多的商品或活動，其實沒有賺
+    reference: "業界常用：Refund rate"
+    grain: 期間
+    needs:
+      - metric: orders
+      - source: orders
+        columns: [order_id, status, refunded_at]
+
   units_ordered:
     group: sales
     label: 銷售件數
@@ -148,6 +182,19 @@ metrics:
         columns: [product_id, quantity, line_revenue, ordered_at]
       - source: products
         columns: [product_id, cost]
+
+  discount_cost:
+    group: profit
+    label: 折扣成本
+    definition: 成立訂單的折扣金額加總（以後端為準）
+    why: 折扣碼帶來的營收要扣掉這個成本才知道值不值得；過期或超用的折扣碼會讓成本失控
+    reference: "業界常用：Promotion cost"
+    grain: 期間
+    needs:
+      - source: orders
+        columns: [order_id, status, discount_amount, coupon_code, created_at]
+      - source: coupons
+        columns: [coupon_code, valid_from, valid_until, usage_limit]
 
   margin_rate:
     group: profit

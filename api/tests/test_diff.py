@@ -24,7 +24,7 @@ def test_plan_changes_v1_to_v2(project: Project) -> None:
 
 
 def test_metric_events(project: Project) -> None:
-    assert metric_events(project, "conversion_rate") == {"order_completed", "page_view"}
+    assert metric_events(project, "conversion_rate") == {"table:orders", "page_view"}
     assert metric_events(project, "sessions") == {"*"}
 
 
@@ -56,12 +56,13 @@ def test_diff_metric_numbers(diff: dict[str, Any]) -> None:
 
 def test_diff_reports_and_findings(diff: dict[str, Any]) -> None:
     reports = {r["name"]: r for r in diff["reports"]}
-    assert reports["promotion_weekly"]["base_broken"] and reports["promotion_weekly"]["target_broken"] is None
+    assert reports["product_weekly"]["base_broken"] is None and reports["product_weekly"]["target_broken"]
     added = {(f["kind"], f["subject"]) for f in diff["findings"]["added"]}
     resolved = {(f["kind"], f["subject"]) for f in diff["findings"]["resolved"]}
-    assert ("grain_duplicate", "model:fct_orders") in added
+    assert ("grain_duplicate", "model:fct_order_events") in added
     assert ("missing_event", "fct_product_views") in added
-    assert ("missing_property", "fct_orders.coupon_code") in resolved
+    assert ("reconcile_gap", "metric:orders_reported") in added
+    assert ("missing_property", "fct_order_events.coupon_code") in resolved
 
 
 def test_diff_ignores_demo_shop_events(client: TestClient) -> None:
@@ -92,8 +93,8 @@ def test_tracking_plan_exposes_fires_on_and_from(client: TestClient) -> None:
 
 
 def test_endpoints_take_plan_param(client: TestClient) -> None:
-    assert client.get("/reports/promotion_weekly", params={"plan": 2}).status_code == 200
-    assert client.get("/reports/promotion_weekly", params={"plan": 1}).status_code == 409
+    assert client.get("/reports/product_weekly", params={"plan": 1}).status_code == 200
+    assert client.get("/reports/product_weekly", params={"plan": 2}).status_code == 409
     assert client.get("/checks", params={"plan": 2}).json()["tracking_plan_version"] == 2
     assert client.get("/metrics", params={"plan": 9}).status_code == 404
 
@@ -111,14 +112,15 @@ def _order(event_id: str, version: int) -> dict[str, Any]:
 
 
 def _orders_on(client: TestClient, version: int) -> int:
-    rows = client.get("/reports/daily_overview", params={"plan": version}).json()["rows"]
-    return next((r["orders"] for r in rows if r["period"] == "2026-10-08"), 0)
+    """前端回報的訂單數（demo 商店送的事件只會出現在這裡，後端訂單不受影響）。"""
+    rows = client.get("/reports/frontend_vs_backend", params={"plan": version}).json()["rows"]
+    return next((r["orders_reported"] for r in rows if r["period"] == "2026-10-08"), 0)
 
 
 def test_live_events_go_to_their_own_version(client: TestClient) -> None:
     client.post("/ingest", json={"events": [_order("o-v2", 2)]})
     assert (_orders_on(client, 1), _orders_on(client, 2)) == (0, 1)
-    report = client.get("/reports/daily_overview", params={"plan": 2}).json()
+    report = client.get("/reports/frontend_vs_backend", params={"plan": 2}).json()
     assert report["live_periods"] == ["2026-10-08"]
 
 

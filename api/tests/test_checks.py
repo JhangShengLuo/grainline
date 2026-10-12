@@ -4,12 +4,12 @@ import duckdb
 import pytest
 
 from app.checks import Finding, check_project, effective_additivity, rate_membership, rollup_comparison
-from app.generator import generate_events
+from app.generator import simulate
 from app.lineage import metric_lineage, resolve
 from app.spec import Project
 from app.warehouse import build_warehouse
 
-from .conftest import event
+from .conftest import backend_order, event, world
 
 
 def _keys(findings: list[Finding]) -> set[tuple[str, str, str, str]]:
@@ -27,14 +27,14 @@ def test_static_checks_find_the_three_deliberate_conflicts(project: Project) -> 
     assert _keys(check_project(project)) == {
         ("R1", "error", "rollup_non_additive", "metric:weekly_uv_from_daily"),
         ("R2", "error", "rate_filter", "metric:web_conversion_rate"),
-        ("R3", "error", "missing_property", "fct_orders.coupon_code"),
+        ("R3", "error", "missing_property", "fct_order_events.coupon_code"),
     }
 
 
 @pytest.fixture
 def shop_findings(con: duckdb.DuckDBPyConnection, project: Project) -> dict[str, Finding]:
     lineage = resolve(project)
-    build_warehouse(con, project, generate_events(project), lineage)
+    build_warehouse(con, project, simulate(project), lineage)
     return {f.subject: f for f in check_project(project, lineage, con)}
 
 
@@ -55,8 +55,9 @@ def test_r2_evidence_counts_numerator_outside_denominator(shop_findings: dict[st
 
 
 def test_r3_evidence_shows_frontend_never_sends_the_property(shop_findings: dict[str, Finding]) -> None:
-    finding = shop_findings["fct_orders.coupon_code"]
-    assert finding.impacted == ["report:promotion_weekly"]
+    finding = shop_findings["fct_order_events.coupon_code"]
+    # 折扣碼報表改用後端訂單，所以這個斷鏈不再影響任何報表；但前端確實沒送
+    assert finding.impacted == []
     assert finding.evidence is not None
     assert finding.evidence["events"] > 0
     assert finding.evidence["events_with_property"] == 0
@@ -92,12 +93,16 @@ def test_rate_membership_exact(con: duckdb.DuckDBPyConnection, project: Project)
     build_warehouse(
         con,
         project,
-        [
-            event("page_view", "2026-09-01 10:00:00", "w", page_type="home"),
-            event("order_completed", "2026-09-01 10:05:00", "w", order_id="o1", revenue=100, item_count=1),
-            event("page_view", "2026-09-01 11:00:00", "m", page_type="home", platform="app"),
-            event("order_completed", "2026-09-01 11:05:00", "m", order_id="o2", revenue=100, item_count=1, platform="app"),
-        ],
+        world(
+            [
+                event("page_view", "2026-09-01 10:00:00", "w", page_type="home"),
+                event("page_view", "2026-09-01 11:00:00", "m", page_type="home", platform="app"),
+            ],
+            [
+                backend_order("o1", "2026-09-01 10:05:00", "w", 100),
+                backend_order("o2", "2026-09-01 11:05:00", "m", 100, platform="app"),
+            ],
+        ),
     )
     evidence = rate_membership(con, project, "web_conversion_rate", "day")
     assert (evidence["numerator_total"], evidence["outside"], evidence["periods_over_1"]) == (2, 1, 1)
@@ -175,5 +180,6 @@ def test_metric_lineage_reaches_l1(project: Project) -> None:
     tree = metric_lineage(project, resolve(project), "aov")
     revenue = next(f for f in tree["numerator"]["fields"] if f["role"] == "measure")
     assert [h["layer"] for h in revenue["hops"]] == ["L4", "L3", "L2", "L1"]
-    assert revenue["hops"][-1]["name"] == "order_completed.revenue"
+    # 營收來自後端訂單主檔
+    assert revenue["hops"][-1]["name"] == "orders.total"
     assert revenue["type"] == "number" and revenue["broken"] is None

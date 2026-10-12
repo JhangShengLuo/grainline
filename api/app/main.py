@@ -22,7 +22,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError
 
-from .assistant import MODEL, make_client, propose_playbook, save_playbook
+from .assistant import Provider, make_provider, propose_playbook, save_playbook
 from .catalog import catalog_items
 from .checks import Finding, check_project, effective_additivity, metric_format
 from .compiler import compile_project
@@ -150,7 +150,7 @@ class SavePlaybook(BaseModel):
 
 
 def create_app(
-    spec_dir: Path | None = None, data_dir: Path | None = None, llm_client: Any | None = None
+    spec_dir: Path | None = None, data_dir: Path | None = None, llm: Provider | None = None
 ) -> FastAPI:
     workspace = Workspace(
         spec_dir or Path(os.environ.get("GRAINLINE_SPECS", DEFAULT_SPECS)),
@@ -358,30 +358,31 @@ def create_app(
 
     # ---------- AI 提案 ----------
 
-    def client() -> Any | None:
-        return llm_client if llm_client is not None else make_client()
+    def provider() -> Provider | None:
+        return llm if llm is not None else make_provider()
 
     @app.get("/assistant/status")
     def assistant_status() -> dict[str, Any]:
-        available = client() is not None
+        current = provider()
         return {
-            "available": available,
-            "model": MODEL,
-            "reason": None if available else "沒有設定 ANTHROPIC_API_KEY：在 .env 加上金鑰後重新啟動 api。",
+            "available": current is not None,
+            "provider": current.name if current else None,
+            "model": current.model if current else None,
+            "reason": None if current else "沒有設定 OPENROUTER_API_KEY 或 ANTHROPIC_API_KEY：在 .env 加上其中一個後重新啟動 api。",
         }
 
     @app.post("/assistant/playbooks")
     def assistant_playbook(body: PlaybookRequest) -> dict[str, Any]:
         """自然語言 → L5 劇本：Claude 提案，規則引擎驗證，不通過就讓它修正（還不會寫入）。"""
-        llm = client()
-        if llm is None:
-            raise HTTPException(503, "沒有設定 ANTHROPIC_API_KEY")
+        current = provider()
+        if current is None:
+            raise HTTPException(503, "沒有設定 OPENROUTER_API_KEY 或 ANTHROPIC_API_KEY")
         with workspace.lock:
             state = workspace.state(body.plan, include_live=False)
             cursor = state.con.cursor()  # 呼叫 Claude 要等一陣子，不要鎖住其他請求
             project = state.project
         try:
-            return propose_playbook(llm, project, cursor, body.request)
+            return propose_playbook(current, project, cursor, body.request)
         except anthropic.APIStatusError as exc:
             raise HTTPException(502, f"Claude API 錯誤（{exc.status_code}）：{exc.message}") from exc
         except anthropic.APIConnectionError as exc:

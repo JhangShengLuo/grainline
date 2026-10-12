@@ -9,7 +9,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from app.assistant import output_schema, system_prompt, to_decision
+from app.assistant import OPENROUTER_BASE_URL, Provider, make_provider, output_schema, system_prompt, to_decision
 from app.library import load_library
 from app.main import create_app
 
@@ -53,6 +53,7 @@ class FakeClaude:
         self.stop_reason = stop_reason
         self.calls: list[dict[str, Any]] = []
         self.beta = SimpleNamespace(messages=SimpleNamespace(create=self.create))
+        self.messages = SimpleNamespace(create=self.create)
 
     def create(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
@@ -68,8 +69,9 @@ def spec_dir(tmp_path: Path) -> Path:
     return copy_small_specs(tmp_path / "shop")
 
 
-def _client(spec_dir: Path, tmp_path: Path, fake: Any) -> TestClient:
-    return TestClient(create_app(spec_dir, tmp_path / "data", llm_client=fake))
+def _client(spec_dir: Path, tmp_path: Path, fake: Any, provider: str = "anthropic") -> TestClient:
+    model = "claude-opus-5-5" if provider == "anthropic" else "anthropic/claude-opus-5.5"
+    return TestClient(create_app(spec_dir, tmp_path / "data", llm=Provider(provider, fake, model)))  # type: ignore[arg-type]
 
 
 def test_schema_only_allows_library_metrics() -> None:
@@ -102,6 +104,7 @@ def test_valid_proposal_is_previewed_not_saved(spec_dir: Path, tmp_path: Path) -
     assert call["model"] == "claude-opus-5-5"
     assert call["output_config"]["format"]["type"] == "json_schema"
     assert call["fallbacks"] == "default"
+    assert call["betas"] == ["server-side-fallback-2026-07-01"]
 
 
 def test_engine_feedback_lets_claude_fix_the_playbook(spec_dir: Path, tmp_path: Path) -> None:
@@ -153,8 +156,56 @@ def test_save_appends_and_keeps_comments(spec_dir: Path, tmp_path: Path) -> None
 
 
 def test_unavailable_without_credentials(spec_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"):
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE", "OPENROUTER_API_KEY"):
         monkeypatch.delenv(key, raising=False)
     client = TestClient(create_app(spec_dir, tmp_path / "data"))
     assert client.get("/assistant/status").json()["available"] is False
     assert client.post("/assistant/playbooks", json={"request": "優先補貨的商品"}).status_code == 503
+
+
+# ---------- OpenRouter ----------
+
+
+def test_openrouter_requests_skip_anthropic_only_parameters(spec_dir: Path, tmp_path: Path) -> None:
+    fake = FakeClaude(_proposal())
+    body = _client(spec_dir, tmp_path, fake, "openrouter").post("/assistant/playbooks", json={"request": "優先補貨"}).json()
+    assert body["status"] == "ready"
+    call = fake.calls[0]
+    assert call["model"] == "anthropic/claude-opus-5.5"
+    assert "fallbacks" not in call and "betas" not in call
+    assert call["output_config"]["format"]["type"] == "json_schema"
+    assert call["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def _auth_headers(client: Any) -> dict[str, str]:
+    import anthropic
+
+    options = anthropic._models.FinalRequestOptions.construct(method="post", url="/v1/messages", json_data={})
+    request = client._build_request(options)
+    return {k.lower(): v for k, v in request.headers.items() if k.lower() in ("x-api-key", "authorization")}
+
+
+def test_openrouter_takes_priority_and_never_sends_the_anthropic_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-never-leave")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-demo")
+    monkeypatch.delenv("GRAINLINE_MODEL", raising=False)
+    provider = make_provider()
+    assert provider is not None and provider.name == "openrouter"
+    assert provider.model == "anthropic/claude-opus-5.5"
+    assert str(provider.client.base_url).rstrip("/") == OPENROUTER_BASE_URL
+    headers = _auth_headers(provider.client)
+    assert headers == {"authorization": "Bearer sk-or-demo"}
+    assert "sk-ant-should-never-leave" not in str(headers)
+
+
+def test_anthropic_is_used_without_openrouter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("GRAINLINE_MODEL", "claude-sonnet-5-5")
+    provider = make_provider()
+    assert provider is not None and (provider.name, provider.model) == ("anthropic", "claude-sonnet-5-5")
+
+
+def test_status_reports_the_provider(spec_dir: Path, tmp_path: Path) -> None:
+    status = _client(spec_dir, tmp_path, FakeClaude(), "openrouter").get("/assistant/status").json()
+    assert status == {"available": True, "provider": "openrouter", "model": "anthropic/claude-opus-5.5", "reason": None}

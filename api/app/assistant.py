@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import anthropic
 import duckdb
@@ -22,7 +23,34 @@ from .library import Library, load_library
 from .lineage import Lineage, resolve
 from .spec import Decision, Project
 
-MODEL = os.environ.get("GRAINLINE_MODEL", "claude-opus-5-5")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api"  # OpenRouter 的 Anthropic 相容端點
+DEFAULT_MODELS = {"anthropic": "claude-opus-5-5", "openrouter": "anthropic/claude-opus-5.5"}
+
+
+@dataclass(frozen=True)
+class Provider:
+    """呼叫 Claude 的方式：直接用 Anthropic API，或經過 OpenRouter。"""
+
+    name: Literal["anthropic", "openrouter"]
+    client: Any
+    model: str
+
+
+def make_provider() -> Provider | None:
+    """設了 OPENROUTER_API_KEY 就走 OpenRouter（優先，即使也有 Anthropic 金鑰）；否則用 Anthropic 認證；都沒有就回傳 None。
+
+    走 OpenRouter 時只送 OpenRouter 的金鑰（Authorization: Bearer），不會把 Anthropic 金鑰送出去。
+    """
+    override = os.environ.get("GRAINLINE_MODEL")
+    try:
+        if key := os.environ.get("OPENROUTER_API_KEY"):
+            client = anthropic.Anthropic(base_url=OPENROUTER_BASE_URL, auth_token=key, api_key=None)
+            return Provider("openrouter", client, override or DEFAULT_MODELS["openrouter"])
+        if any(os.environ.get(k) for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE")):
+            return Provider("anthropic", anthropic.Anthropic(), override or DEFAULT_MODELS["anthropic"])
+    except anthropic.AnthropicError:
+        return None
+    return None
 MAX_ATTEMPTS = 3
 
 _FIELDS = ["feasible", "name", "label", "question", "inputs", "score", "rules", "top_k",
@@ -150,16 +178,6 @@ def system_prompt(project: Project, library: Library) -> str:
 {example}"""
 
 
-def make_client() -> Any | None:
-    """沒有任何 Anthropic 認證時回傳 None，功能顯示為未設定。"""
-    if not any(os.environ.get(k) for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE")):
-        return None
-    try:
-        return anthropic.Anthropic()
-    except anthropic.AnthropicError:
-        return None
-
-
 def to_decision(proposal: dict[str, Any]) -> dict[str, Any]:
     """Claude 的輸出 → l5_decisions.yaml 的格式。"""
     score: dict[str, Any] = {"label": proposal["score"]["label"], "rate": proposal["score"]["rate"]}
@@ -201,7 +219,17 @@ def validate(project: Project, con: duckdb.DuckDBPyConnection, name: str, decisi
     return [], result
 
 
-def propose_playbook(client: Any, project: Project, con: duckdb.DuckDBPyConnection, request: str) -> dict[str, Any]:
+def _create(provider: Provider, **request: Any) -> Any:
+    if provider.name == "anthropic":
+        # 被安全分類器拒絕時，伺服器端改用適合的模型重跑（Anthropic API 專用的 beta）
+        return provider.client.beta.messages.create(
+            **request, betas=["server-side-fallback-2026-07-01"], fallbacks="default"
+        )
+    # OpenRouter：只送標準參數，Anthropic 專用的 beta 參數不送
+    return provider.client.messages.create(**request)
+
+
+def propose_playbook(provider: Provider, project: Project, con: duckdb.DuckDBPyConnection, request: str) -> dict[str, Any]:
     library = load_library()
     system = system_prompt(project, library)
     schema = output_schema(library)
@@ -209,15 +237,14 @@ def propose_playbook(client: Any, project: Project, con: duckdb.DuckDBPyConnecti
     attempts: list[dict[str, Any]] = []
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        response = client.beta.messages.create(
-            model=MODEL,
+        response = _create(
+            provider,
+            model=provider.model,
             max_tokens=16000,
-            system=system,
+            # 系統提示（指標庫、範例）每次都一樣，標記快取
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=messages,
-            cache_control={"type": "ephemeral"},  # 系統提示（指標庫、範例）每次都一樣
             output_config={"effort": "medium", "format": {"type": "json_schema", "schema": schema}},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",  # 被安全分類器拒絕時，伺服器端改用適合的模型重跑
         )
         if response.stop_reason == "refusal":
             return {"status": "refused", "attempts": attempts,

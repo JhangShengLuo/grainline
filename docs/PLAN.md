@@ -241,6 +241,7 @@ L1 前端事件 ＋ 業務資料（訂單明細、商品、庫存）
 - **只能用指標庫**：structured outputs（`output_config.format` JSON schema）把指標名稱限定在指標庫的 enum 裡；系統提示標明每個指標可不可以當輸入（比率不行）。資料不夠時回 `feasible: false` 與缺的指標，不能自己發明。
 - **模型**：`claude-opus-5-5`、effort `medium`；系統提示（指標庫、範例劇本）固定，開啟 prompt caching；預設開啟伺服器端 fallback（`fallbacks: "default"`），並處理 `refusal`、`max_tokens` 兩種 stop reason。
 - **人把關**：結果只是預覽，按下儲存才附加到 `l5_decisions.yaml`（保留原本的註解），名稱重複會被擋下。
+- **可以經 OpenRouter 呼叫**（2026-10-12 加入）：設了 `OPENROUTER_API_KEY` 就優先走 OpenRouter 的 Anthropic 相容端點（`https://openrouter.ai/api`，模型 `anthropic/claude-opus-5.5`），仍用官方 Anthropic SDK；Anthropic 專用的 fallback beta 參數不送，快取改標在系統提示上。走 OpenRouter 時只送 OpenRouter 的金鑰，即使也設了 Anthropic 金鑰也不會送出去（有測試鎖住）。理由：demo 用的金鑰外洩時，損失範圍比較好控制。`GRAINLINE_MODEL` 可以換模型。
 - **沒有金鑰時功能顯示未設定**，其他功能照常；金鑰放在專案根目錄的 `.env`（不 commit，附 `.env.example`），由 docker compose 傳進 api。呼叫 Claude 時用獨立的 DuckDB cursor，不鎖住其他請求。
 - **測試不呼叫真的 API**：用假的 client 依序回傳準備好的答案，驗證提案、引擎回饋修正、放棄、資料不足、拒絕、儲存、未設定。
 
@@ -344,7 +345,7 @@ L1 前端事件 ＋ 業務資料（訂單明細、商品、庫存）
 - [x] 指標庫不夠時誠實說缺什麼；Claude 拒絕時有清楚的訊息
 - [x] 儲存後附加到 `l5_decisions.yaml`、保留註解，決策頁可以直接執行新劇本
 - [x] 沒有金鑰時顯示未設定，其他功能不受影響
-- [ ] 用真的金鑰實際跑一次（需要使用者在 `.env` 設定 `ANTHROPIC_API_KEY`）
+- [ ] 用真的金鑰實際跑一次（需要使用者在 `.env` 設定 `OPENROUTER_API_KEY` 或 `ANTHROPIC_API_KEY`）
 
 ### M11
 
@@ -355,7 +356,7 @@ L1 前端事件 ＋ 業務資料（訂單明細、商品、庫存）
 
 ### 第二階段之後還沒做的
 
-- [ ] 用真的 `ANTHROPIC_API_KEY` 實際跑一次 AI 提案
+- [ ] 用真的 `OPENROUTER_API_KEY`（或 `ANTHROPIC_API_KEY`）實際跑一次 AI 提案
 - [ ] 對外可存取的 demo 部署（目前只能在本機 `docker compose up`）
 - [ ] 報表卡紅黃燈、五層聯動視圖、dbt 與 Cube 匯出、L1 個資與同意標記、Jackie 的逐張報表簽核流程
 

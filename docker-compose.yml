@@ -9,8 +9,11 @@ services:
       - ./data:/repo/data
       - ./specs:/repo/specs
     environment:
-      # AI 提案（M10）用；沒設定時其他功能照常。放在專案根目錄的 .env 或 shell 環境變數
+      # AI 提案（M10）用，擇一即可；兩個都設時優先用 OpenRouter。沒設定時其他功能照常。
+      # 放在專案根目錄的 .env 或 shell 環境變數
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GRAINLINE_MODEL: ${GRAINLINE_MODEL:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s

@@ -6,7 +6,8 @@ import { useApi } from "./api";
 
 interface Status {
   available: boolean;
-  model: string;
+  provider: "anthropic" | "openrouter" | null;
+  model: string | null;
   reason: string | null;
 }
 
@@ -99,7 +100,9 @@ export function AssistantPage() {
         <textarea rows={3} value={request} onChange={(e) => setRequest(e.target.value)} />
       </label>
       <button type="button" className="primary" onClick={submit} disabled={busy || !status.data.available || request.trim().length < 4}>
-        {busy ? "Claude 撰寫劇本中，規則引擎驗證中…（約 20–60 秒）" : `請 Claude 提案（${status.data.model}）`}
+        {busy
+          ? "Claude 撰寫劇本中，規則引擎驗證中…（約 20–60 秒）"
+          : `請 Claude 提案（${status.data.provider === "openrouter" ? "經 OpenRouter，" : ""}${status.data.model ?? "未設定"}）`}
       </button>
       {error && <p className="warning-text">{error}</p>}
 

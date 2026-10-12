@@ -325,3 +325,57 @@ a.chip-code { text-decoration: none; display: inline-block; margin-bottom: 0.2re
 .story-picks { list-style: none; padding: 0; margin: 0.5rem 0 0; font-size: 0.88rem; columns: 2; }
 .story-picks li.hit { color: var(--success); font-weight: 600; }
 .rules { list-style: none; padding: 0; margin: 0.3rem 0; display: flex; flex-direction: column; gap: 0.2rem; }
+
+/* ---------- M13 埋點透視 ---------- */
+.overlay-toggle { font-size: 0.85rem; padding: 0.3rem 0.8rem; }
+.overlay-toggle.active { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+.trackpoint { position: relative; display: inline-block; outline: 2px solid #7c3aed; outline-offset: 3px; border-radius: 6px; }
+.trackpoint.block { display: block; }
+.trackpoint.missing { outline: 2px dashed var(--danger); }
+.trackpoint .tp-popover { display: none; position: absolute; z-index: 30; top: calc(100% + 8px); left: 0; width: 320px; max-width: 80vw; background: var(--surface); color: var(--text); border: 1px solid #7c3aed; border-radius: 10px; padding: 0.6rem 0.75rem; box-shadow: 0 8px 24px rgb(0 0 0 / 0.25); font-size: 0.8rem; line-height: 1.45; text-align: left; font-weight: 400; }
+.trackpoint.missing .tp-popover { border-color: var(--danger); }
+.trackpoint:hover .tp-popover, .trackpoint:focus-within .tp-popover { display: block; }
+.tp-title { display: block; font-weight: 700; margin-bottom: 0.3rem; }
+.tp-moment + .tp-moment { border-top: 1px solid var(--border); margin-top: 0.4rem; padding-top: 0.4rem; }
+.tp-when { color: var(--muted); }
+.tp-event code { font-weight: 700; }
+.tp-props { list-style: none; padding: 0; margin: 0.2rem 0; }
+.tp-props li { display: flex; gap: 0.4rem; }
+.tp-optional { color: var(--muted); font-size: 0.7rem; }
+.tp-metrics { color: #7c3aed; font-weight: 600; }
+.tp-caveat, .tp-missing { display: block; color: var(--warning-text); background: var(--warning-bg); border-radius: 6px; padding: 0.25rem 0.4rem; margin-top: 0.3rem; }
+.tp-caveat { list-style: none; }
+.tp-missing ul { margin: 0.2rem 0 0; padding-left: 1rem; }
+.tp-note { display: block; color: var(--muted); margin-top: 0.35rem; }
+.tp-page { display: inline-block; font-size: 0.8rem; color: #7c3aed; padding: 0.15rem 0.5rem; margin-bottom: 0.75rem; }
+.metric-toasts { position: fixed; left: 16px; bottom: 16px; z-index: 40; display: flex; flex-direction: column; gap: 0.4rem; max-width: min(420px, calc(100vw - 32px)); }
+.metric-toast { background: #7c3aed; color: #fff; border-radius: 10px; padding: 0.5rem 0.75rem; font-size: 0.85rem; box-shadow: 0 6px 18px rgb(0 0 0 / 0.25); display: flex; gap: 0.5rem; flex-wrap: wrap; animation: toast-in 0.2s ease-out; }
+.metric-toast code { color: #fff; font-weight: 700; }
+@keyframes toast-in { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-color-scheme: dark) { .overlay-toggle.active { background: #8b5cf6; border-color: #8b5cf6; } .trackpoint { outline-color: #a78bfa; } .tp-metrics, .tp-page { color: #c4b5fd; } .metric-toast { background: #6d28d9; } }
+
+/* ---------- M13 會議模式 ---------- */
+.meeting { min-height: 100vh; display: flex; flex-direction: column; padding: 1rem 16px; max-width: 1200px; margin: 0 auto; }
+.meeting-top { display: flex; justify-content: space-between; }
+.slide { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 2rem 0; gap: 1rem; }
+.slide-kicker { color: var(--accent); font-weight: 700; letter-spacing: 0.08em; margin: 0; font-size: 1rem; }
+.slide-title { font-size: clamp(1.8rem, 4vw, 3rem); line-height: 1.25; margin: 0; }
+.slide-body { font-size: clamp(1rem, 1.6vw, 1.3rem); display: flex; flex-direction: column; gap: 1rem; }
+.slide-body p { margin: 0; max-width: 60em; }
+.slide-link { align-self: flex-start; }
+.bigs { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+.big { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1rem 1.25rem; }
+.big.good { border-color: var(--success); }
+.big.bad { border-color: var(--danger); }
+.big-value { font-size: clamp(2rem, 5vw, 3.5rem); font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.big.good .big-value { color: var(--success); }
+.big.bad .big-value { color: var(--danger); }
+.big-label { color: var(--muted); font-size: 0.95rem; margin-top: 0.35rem; }
+.chain { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.chain li { display: grid; grid-template-columns: 8em minmax(0, 1fr); gap: 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem 0.9rem; }
+.chain li + li::before { content: none; }
+.meeting-nav { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.5rem 0; }
+.dots { display: flex; gap: 0.4rem; }
+.dot { width: 0.7rem; height: 0.7rem; padding: 0; border-radius: 999px; background: var(--border); border: none; }
+.dot.active { background: var(--accent); }
+@media (max-width: 640px) { .chain li { grid-template-columns: minmax(0, 1fr); gap: 0.2rem; } }

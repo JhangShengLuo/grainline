@@ -3,6 +3,7 @@ import { Link, Navigate, useLocation, useNavigate, useParams } from "react-route
 
 import { formatPrice, type Product } from "../api";
 import { useMomentOnce, usePageLoad, useTracking } from "../tracking/TrackingProvider";
+import { PageMoments, TrackPoint } from "./TrackPoint";
 import { useCart } from "./CartContext";
 import { useCatalog } from "./ShopLayout";
 
@@ -32,11 +33,14 @@ function ProductCard({ product, list, position }: { product: Product; list: stri
   }, [tracker, product.id, product.price, list, position, location.key]);
 
   return (
-    <Link ref={ref} to={`/shop/p/${product.id}`} className="card">
-      <div className="thumb" aria-hidden="true">{product.name.slice(-2)}</div>
-      <div className="card-name">{product.name}</div>
-      <div className="card-price">{formatPrice(product.price)}</div>
-    </Link>
+    <TrackPoint moments={["product_impression"]} label={`商品卡片（${list === "home_featured" ? "首頁精選" : "分類頁"}第 ${position} 個）`} block
+      note="點進去會到商品頁（商品頁的埋點在頁面標題下面）">
+      <Link ref={ref} to={`/shop/p/${product.id}`} className="card">
+        <div className="thumb" aria-hidden="true">{product.name.slice(-2)}</div>
+        <div className="card-name">{product.name}</div>
+        <div className="card-price">{formatPrice(product.price)}</div>
+      </Link>
+    </TrackPoint>
   );
 }
 
@@ -72,6 +76,7 @@ export function HomePage() {
   return (
     <>
       <h1>本週精選</h1>
+      <PageMoments moments={["page_load"]} label="首頁載入" />
       <Categories catalog={catalog} />
       <ProductGrid
         list="home_featured"
@@ -89,6 +94,7 @@ export function CategoryPage() {
   return (
     <>
       <h1>{category}</h1>
+      <PageMoments moments={["page_load"]} label="分類頁載入" />
       <Categories catalog={catalog} current={category} />
       <ProductGrid list="category" products={catalog.filter((p) => p.category === category)} />
     </>
@@ -137,6 +143,7 @@ export function ProductPage() {
       <div className="product-info">
         <p className="muted">{product.category}・{product.id}</p>
         <h1>{product.name}</h1>
+        <PageMoments moments={["page_load", "product_detail_load"]} label="商品頁載入" />
         <p className="price">{formatPrice(product.price)}</p>
         <label className="field">
           數量
@@ -145,16 +152,21 @@ export function ProductPage() {
           </select>
         </label>
         <div className="actions">
-          <button type="button" className="primary" onClick={addToCart} disabled={status === "adding"}>
-            {status === "adding" ? "加入中…" : "加入購物車"}
-          </button>
-          <button
-            type="button"
-            onClick={() => tracker.track("wishlist_add", { product_id: product.id })}
-            title="wishlist_add 沒有在 L1 宣告，看看右側紀錄會怎麼樣"
-          >
-            ♡ 收藏
-          </button>
+          <TrackPoint moments={["add_to_cart_click", "add_to_cart_success"]} label="加入購物車按鈕"
+            note="按下就是 add_to_cart_click；購物車 API 成功才是 add_to_cart_success（10% 會失敗）">
+            <button type="button" className="primary" onClick={addToCart} disabled={status === "adding"}>
+              {status === "adding" ? "加入中…" : "加入購物車"}
+            </button>
+          </TrackPoint>
+          <TrackPoint moments={[]} custom="wishlist_add" label="收藏按鈕">
+            <button
+              type="button"
+              onClick={() => tracker.track("wishlist_add", { product_id: product.id })}
+              title="wishlist_add 沒有在 L1 宣告，看看右側紀錄會怎麼樣"
+            >
+              ♡ 收藏
+            </button>
+          </TrackPoint>
         </div>
         {status === "added" && <p className="success">已加入購物車。<Link to="/shop/cart">去結帳</Link></p>}
         {status === "failed" && <p className="warning-text">庫存同步逾時，請再試一次。（模擬 API 失敗：看看兩個版本的 add_to_cart 各記錄了什麼）</p>}
@@ -170,6 +182,7 @@ export function CartPage() {
   return (
     <>
       <h1>購物車</h1>
+      <PageMoments moments={["page_load"]} label="購物車頁載入" />
       <CartTable />
       <div className="actions">
         <Link to="/shop/checkout" className="button primary">前往結帳</Link>
@@ -202,11 +215,22 @@ function CartTable() {
   );
 }
 
+interface BackendOrder {
+  order_id: string;
+  subtotal: number;
+  discount_amount: number;
+  shipping_fee: number;
+  total: number;
+  coupon: { code: string; accepted: boolean; message: string } | null;
+}
+
 interface OrderState {
   orderId: string;
   couponCode: string | null;
+  /** 前端回報的金額：購物車金額（未扣折扣、不含運費） */
   revenue: number;
   itemCount: number;
+  backend: BackendOrder;
 }
 
 const orderContext = (order: OrderState) => ({
@@ -219,8 +243,9 @@ export function CheckoutPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const cart = useCart();
-  const { tracker } = useTracking();
+  const { tracker, platform } = useTracking();
   const [paying, setPaying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [coupon, setCoupon] = useState("");
   // 進入結帳頁當下的購物車內容
   const [snapshot] = useState(() => ({ cart: { total: cart.total, count: cart.count } }));
@@ -231,14 +256,34 @@ export function CheckoutPage() {
 
   async function pay() {
     setPaying(true);
-    await sleep(500); // 假裝付款
+    setError(null);
+    // 後端建立訂單：計價、驗證折扣碼、算運費。訂單以後端為準，前端事件只是回報
+    const response = await fetch("/api/shop/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        anonymous_id: tracker.anonymousId,
+        user_id: tracker.userId,
+        platform,
+        lines: cart.lines.map((l) => ({ product_id: l.productId, quantity: l.quantity })),
+        coupon_code: coupon.trim() || null,
+      }),
+    });
+    if (!response.ok) {
+      setPaying(false);
+      setError(`後端建立訂單失敗（HTTP ${response.status}）`);
+      return;
+    }
+    const backend: BackendOrder = await response.json();
+    await sleep(300); // 假裝付款
     const order: OrderState = {
-      orderId: `o-${crypto.randomUUID().slice(0, 8)}`,
-      couponCode: coupon.trim().toUpperCase() || null,
+      orderId: backend.order_id,
+      couponCode: backend.coupon?.accepted ? backend.coupon.code : null,
       revenue: cart.total,
       itemCount: cart.count,
+      backend,
     };
-    // 後端建立訂單成功；接著才導到成功頁（使用者可能沒等到，也可能重新整理）
+    // 付款成功；接著才導到成功頁（使用者可能沒等到，也可能重新整理）
     tracker.moment("payment_success", orderContext(order));
     cart.clear();
     navigate("/shop/complete", { state: order, replace: true });
@@ -247,6 +292,7 @@ export function CheckoutPage() {
   return (
     <>
       <h1>結帳</h1>
+      <PageMoments moments={["page_load", "checkout_load"]} label="結帳頁載入" />
       <CartTable />
       <label className="field">
         折扣碼（選填）
@@ -254,10 +300,14 @@ export function CheckoutPage() {
       </label>
       <p className="muted">這是 demo，不會真的扣款。</p>
       <div className="actions">
-        <button type="button" className="primary" onClick={pay} disabled={paying}>
-          {paying ? "付款中…" : `付款 ${formatPrice(cart.total)}`}
-        </button>
+        <TrackPoint moments={["payment_success"]} label="付款按鈕"
+          note="按下後由後端建立訂單（orders 表）：訂單數、營收以後端為準；前端事件只是回報">
+          <button type="button" className="primary" onClick={pay} disabled={paying}>
+            {paying ? "付款中…" : `付款 ${formatPrice(cart.total)}`}
+          </button>
+        </TrackPoint>
       </div>
+      {error && <p className="warning-text">{error}</p>}
     </>
   );
 }
@@ -273,10 +323,19 @@ export function CompletePage() {
   return (
     <>
       <h1>訂單成立</h1>
-      <p>
-        訂單編號 <code>{order.orderId}</code>，金額 {formatPrice(order.revenue)}，共 {order.itemCount} 件
-        {order.couponCode && <>，折扣碼 <code>{order.couponCode}</code></>}。
-      </p>
+      <PageMoments moments={["order_complete_page_load"]} label="付款成功頁載入" />
+      <p>訂單編號 <code>{order.orderId}</code>，共 {order.itemCount} 件。</p>
+      <table className="cart">
+        <tbody>
+          <tr><td>商品金額</td><td className="num">{formatPrice(order.backend.subtotal)}</td></tr>
+          <tr><td>折扣{order.couponCode && <>（<code>{order.couponCode}</code>）</>}</td><td className="num">−{formatPrice(order.backend.discount_amount)}</td></tr>
+          <tr><td>運費</td><td className="num">{formatPrice(order.backend.shipping_fee)}</td></tr>
+        </tbody>
+        <tfoot><tr><td>實付</td><td className="num">{formatPrice(order.backend.total)}</td></tr></tfoot>
+      </table>
+      {order.backend.coupon && !order.backend.coupon.accepted && (
+        <p className="warning-text">折扣碼 {order.backend.coupon.code} 沒有套用：{order.backend.coupon.message}</p>
+      )}
       <p className="muted small">試試重新整理這一頁，再看右側的埋點紀錄：v1 和 v2 的結果不一樣。</p>
       <p><Link to="/shop">繼續逛逛</Link></p>
     </>
@@ -313,7 +372,9 @@ export function LoginPage() {
         </select>
       </label>
       <p className="muted">登入前在這個裝置的瀏覽紀錄，L2 會回溯算到同一個人身上。</p>
-      <button type="submit" className="primary">登入</button>
+      <TrackPoint moments={["login_success"]} label="登入按鈕" note="登入成功後，之後的事件都帶 user_id；登入前的瀏覽也會回溯算到同一個人">
+        <button type="submit" className="primary">登入</button>
+      </TrackPoint>
     </form>
   );
 }

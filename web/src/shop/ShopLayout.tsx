@@ -5,6 +5,7 @@ import { api, type Product } from "../api";
 import { useTracking, type Platform } from "../tracking/TrackingProvider";
 import { useCart } from "./CartContext";
 import { EventLog } from "./EventLog";
+import { InsightProvider, MetricToasts, OverlayToggle } from "./TrackPoint";
 
 export function useCatalog(): Product[] | null {
   return useOutletContext<Product[] | null>();
@@ -20,6 +21,7 @@ export function ShopLayout() {
   }, []);
 
   return (
+    <InsightProvider>
     <div className="shop">
       <header className="shop-header">
         <Link to="/shop" className="brand">Grainline Shop</Link>
@@ -35,6 +37,7 @@ export function ShopLayout() {
             <NavLink to="/shop/login">登入</NavLink>
           )}
         </nav>
+        <OverlayToggle />
         <label className="plan-select" title="切換後，同樣的操作會依新的 tracking plan 送出不同的事件">
           埋點設計
           <select value={planVersion} onChange={(e) => setPlanVersion(Number(e.target.value))}>
@@ -59,6 +62,8 @@ export function ShopLayout() {
         </main>
         <EventLog />
       </div>
+      <MetricToasts />
     </div>
+    </InsightProvider>
   );
 }

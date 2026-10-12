@@ -22,6 +22,7 @@ import {
   LoginPage,
   ProductPage,
 } from "./shop/pages";
+import { MeetingPage } from "./MeetingPage";
 import { TrackingProvider } from "./tracking/TrackingProvider";
 
 export function App() {
@@ -61,6 +62,7 @@ export function App() {
         <Route path="checks" element={<ChecksPage />} />
         <Route path="diff" element={<DiffPage />} />
       </Route>
+      <Route path="/meeting" element={<MeetingPage />} />
       <Route path="*" element={<Navigate to="/shop" replace />} />
     </Routes>
   );

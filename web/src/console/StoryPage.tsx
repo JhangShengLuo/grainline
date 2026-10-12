@@ -164,7 +164,8 @@ export function StoryPage() {
 
           <h2>自己看看</h2>
           <div className="actions">
-            <Link to="/console/decisions/potential_products" className="button primary">打開潛力商品劇本</Link>
+            <Link to="/meeting" className="button primary">會議模式（一頁一重點）</Link>
+            <Link to="/console/decisions/potential_products" className="button">打開潛力商品劇本</Link>
             <Link to="/console/decisions/potential_products?plan=2" className="button">前端提案（v2）會發生什麼</Link>
             <Link to="/console/diff" className="button">v1 vs v2 差異</Link>
             <Link to="/shop" className="button">逛 demo 商店（看埋點即時進報表）</Link>

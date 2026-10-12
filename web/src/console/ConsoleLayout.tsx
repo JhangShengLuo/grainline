@@ -44,6 +44,7 @@ export function ConsoleLayout() {
             <NavLink key={page} to={link(page)} className="nav-other">{PAGE_LABEL[page]}</NavLink>
           ))}
           <Link to="/shop" className="nav-other">Demo 商店</Link>
+          <Link to="/meeting" className="nav-other">會議模式</Link>
         </nav>
         {!onDiff && plans.data && current !== undefined && (
           <label className="plan-select" title="這一頁依這個 tracking plan 計算">

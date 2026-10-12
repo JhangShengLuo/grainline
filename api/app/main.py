@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import anthropic
 import duckdb
@@ -29,6 +30,7 @@ from .compiler import compile_project
 from .decisions import build_proposal, evaluate, requirements, run_decision, save_proposal
 from .diff import compare
 from .execution import simulate_execution
+from .shop_backend import LiveBackend, ShopOrder, create_order
 from .story import across_markets, build_story
 from .explain import event_catalog, explain_metric, metric_list, model_catalog
 from .generator import World, simulate
@@ -36,7 +38,7 @@ from .ingest import IngestBatch, IncomingEvent, LiveStore, plan_warnings
 from .library import coverage, load_library
 from .lineage import Lineage, metric_lineage, resolve
 from .spec import Project, default_plan_version, load_project, read_tracking_plans
-from .warehouse import build_warehouse, load_events
+from .warehouse import build_warehouse, load_events, load_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SPECS = REPO_ROOT / "specs" / "shop"
@@ -75,6 +77,7 @@ class Workspace:
     def __init__(self, spec_dir: Path, data_dir: Path) -> None:
         self.spec_dir = spec_dir
         self.live = LiveStore(data_dir / f"live_events_{spec_dir.name}.ndjson")
+        self.backend = LiveBackend(data_dir / f"live_backend_{spec_dir.name}.ndjson")
         self.lock = threading.Lock()
         self._fingerprint: tuple[Any, ...] | None = None
         # (版本, 是否包含 demo 商店的事件) → 倉儲
@@ -122,17 +125,32 @@ class Workspace:
             if include_live:
                 live = [e for e in self.live.read_all() if e["tracking_plan_version"] == version]
                 load_events(con, live, source="live")
+                append_backend(con, project, self.backend.read_all())
             self._states[key] = State(project, lineage, con, len(world.events), world)
         return self._states[key]
 
     def built(self, version: int) -> State | None:
         return self._states.get((version, True))
 
+    def built_states(self) -> list[tuple[tuple[int, bool], State]]:
+        return list(self._states.items())
+
 
 def _rows(con: duckdb.DuckDBPyConnection, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
     cursor = con.execute(sql, params or [])
     names = [d[0] for d in cursor.description]
     return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+
+
+def append_backend(con: duckdb.DuckDBPyConnection, project: Project, rows: dict[str, list[dict[str, Any]]]) -> None:
+    """demo 商店建立的後端資料附加到倉儲（後端資料和 tracking plan 無關，每個版本都一樣）。"""
+    for table, items in rows.items():
+        if items and table in project.sources:
+            load_source(con, table, project.sources[table], items, replace=False)
+
+
+def _now_taipei() -> datetime:
+    return datetime.now(ZoneInfo("Asia/Taipei")).replace(tzinfo=None, microsecond=0)
 
 
 def _exists(con: duckdb.DuckDBPyConnection, event_id: str) -> bool:
@@ -150,8 +168,12 @@ class SavePlaybook(BaseModel):
 
 
 def create_app(
-    spec_dir: Path | None = None, data_dir: Path | None = None, llm: Provider | None = None
+    spec_dir: Path | None = None,
+    data_dir: Path | None = None,
+    llm: Provider | None = None,
+    clock: Any = None,
 ) -> FastAPI:
+    now = clock or _now_taipei
     workspace = Workspace(
         spec_dir or Path(os.environ.get("GRAINLINE_SPECS", DEFAULT_SPECS)),
         data_dir or Path(os.environ.get("GRAINLINE_DATA", DEFAULT_DATA)),
@@ -523,6 +545,24 @@ from raw_events where source = 'live' order by 1""")
                 ]
         return {"accepted": len(fresh), "duplicates": len(raw) - len(fresh), "warnings": warnings}
 
+    @app.post("/shop/orders")
+    def shop_order(order: ShopOrder) -> dict[str, Any]:
+        """demo 商店付款：後端建立訂單（計價、驗證折扣碼、算運費）。訂單以這裡為準，前端事件只是回報。"""
+        with workspace.lock:
+            state = workspace.state()
+            try:
+                summary, rows = create_order(state.project, state.con, order, now())
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            workspace.backend.append(rows)
+            # 已經建立的倉儲（每個版本、含 demo 資料的那份）直接附加，不用重建
+            for (version, include_live), built in workspace.built_states():
+                if include_live:
+                    append_backend(built.con, built.project, rows)
+                    built._findings = None
+                    built.cache.clear()
+        return summary
+
     @app.get("/events/live")
     def live_events(limit: int = Query(50, ge=1, le=500), plan: int | None = PlanParam) -> list[dict[str, Any]]:
         """demo 商店在這個版本下送來的事件，以及 L2 怎麼解析它們（person、session、是否被隔離）。"""
@@ -546,6 +586,13 @@ limit {limit}""")
         with workspace.lock:
             deleted = len(workspace.live.read_all())
             workspace.live.clear()
+            workspace.backend.clear()
+            for (_, include_live), built in workspace.built_states():
+                if include_live:
+                    for table in ("orders", "order_lines", "coupon_redemptions"):
+                        if table in built.project.sources:
+                            key = {"orders": "order_id", "order_lines": "order_id", "coupon_redemptions": "redemption_id"}[table]
+                            built.con.execute(f"delete from src_{table} where {key} like '%-live-%'")
             for version in list(workspace.plans()):
                 if state := workspace.built(version):
                     state.con.execute("delete from raw_events where source = 'live'")

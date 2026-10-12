@@ -66,10 +66,11 @@ SOURCE_TYPES = {
 }
 
 
-def load_source(con: duckdb.DuckDBPyConnection, name: str, source: Source, rows: list[dict[str, Any]]) -> int:
-    """業務資料來源載入成 src_<name> 表；只取合約宣告的欄位，資料裡沒有的欄位是 NULL。"""
+def load_source(con: duckdb.DuckDBPyConnection, name: str, source: Source, rows: list[dict[str, Any]],
+                replace: bool = True) -> int:
+    """業務資料來源載入成 src_<name> 表；只取合約宣告的欄位，資料裡沒有的欄位是 NULL。replace=False 時附加。"""
     columns = ", ".join(f"{col} {SOURCE_TYPES[c.type]}" for col, c in source.columns.items())
-    con.execute(f"create or replace table src_{name} ({columns})")
+    con.execute(f"create {'or replace ' if replace else ''}table {'' if replace else 'if not exists '}src_{name} ({columns})")
     if not rows:
         return 0
     with tempfile.TemporaryDirectory() as tmp:

@@ -10,6 +10,9 @@ dependencies = [
     "pyyaml>=6",
     "tzdata>=2024.1",
     "anthropic>=1.0",
+    "jsonschema>=4.20",
+    # Apache Ossie 官方的 Ossie ↔ Cube 轉換器（還沒發佈到 PyPI，鎖定 commit）
+    "apache-ossie-cube @ https://github.com/apache/ossie/archive/e49a0f0ca2336669ba22662853eba63bff3ce8d1.tar.gz#subdirectory=converters/cube",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +26,11 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["app"]
+packages = ["app", "app.library", "app.standards"]
+
+[tool.setuptools.package-data]
+"app.library" = ["*.yaml"]
+"app.standards" = ["*.json", "*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

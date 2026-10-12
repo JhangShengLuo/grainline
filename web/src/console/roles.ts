@@ -1,9 +1,10 @@
 import { useCallback, useState } from "react";
 
-export type Page = "story" | "decisions" | "assistant" | "metrics" | "library" | "reports" | "checks" | "diff" | "events" | "models";
+export type Page = "export" | "story" | "decisions" | "assistant" | "metrics" | "library" | "reports" | "checks" | "diff" | "events" | "models";
 
 export const PAGE_LABEL: Record<Page, string> = {
   story: "為什麼",
+  export: "標準匯出",
   decisions: "決策",
   assistant: "AI 提案",
   metrics: "指標說明",
@@ -17,9 +18,9 @@ export const PAGE_LABEL: Record<Page, string> = {
 
 export const ROLES = {
   biz: { label: "業務／行銷", pages: ["decisions", "assistant", "metrics", "library", "reports"] },
-  bi: { label: "BI", pages: ["reports", "decisions", "assistant", "metrics", "library", "checks", "diff"] },
+  bi: { label: "BI", pages: ["reports", "decisions", "assistant", "metrics", "library", "checks", "diff", "export"] },
   fe: { label: "前端／PM", pages: ["events", "library", "diff", "checks"] },
-  de: { label: "DE", pages: ["models", "library", "checks", "diff", "reports"] },
+  de: { label: "DE", pages: ["models", "library", "checks", "export", "diff", "reports"] },
 } as const satisfies Record<string, { label: string; pages: readonly Page[] }>;
 
 export type Role = keyof typeof ROLES;

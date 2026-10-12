@@ -135,7 +135,7 @@ L1 前端事件 ＋ 業務資料（訂單明細、商品、庫存）
 - **M11：傳統做法對照**：同一個「找潛力商品」需求，用多部門開會、文件往返的方式走一遍（時間軸、會議紀錄、互相矛盾的規格、上線後才發現的錯），和用這個工具走一遍並排比較，數字由模擬器算出
 - **M12：後端資料是真相**（2026-10-12 加入）：訂單主檔、折扣碼主檔與使用紀錄；訂單數、營收、買家改從後端算；R4 業務規則（參照完整、有效期間、次數上限、金額一致）與前後端對帳
 - **M13：埋點透視與會議模式**：demo 商店 hover 看埋點（參考 Amplitude Visual Labeling、Heap Visual Labeler）、點了指標跳動；一頁一重點的會議導覽；demo 商店付款也建立後端訂單
-- **M14：語意層標準匯出**：保留 Grainline 的 YAML，匯出 Apache Ossie（OSI）與 Cube YAML，Grainline 獨有的部分放延伸欄位
+- **M14：語意層標準匯出**：保留 Grainline 的 YAML，匯出 Apache Ossie（OSI）並用官方 schema 驗證，經官方轉換器轉成 Cube；Grainline 獨有的部分放延伸欄位
 - **之後**：報表卡紅黃燈、五層聯動視圖、L1 個資與同意標記、對外可存取的 demo 部署
 
 ### M1 設計決定
@@ -272,6 +272,14 @@ L1 前端事件 ＋ 業務資料（訂單明細、商品、庫存）
 - **埋點透視**（參考 Amplitude Visual Labeling、Heap Visual Labeler）：商店右上角的開關。有埋點的元素加紫色外框、沒被目前的設計記錄的加紅色虛線；滑鼠移上去看：什麼時候送、送哪個事件、每個欄位的值從哪裡來、會變成哪些指標、送出時機的副作用；沒被記錄時列出會讓哪些指標算不出來或定義不同。頁面載入的埋點放在標題下面。送出事件時左下角提示「這會變成哪些數字」。`/shop?overlay=1` 直接打開。
 - **會議模式**（`/meeting`）：8 頁、一頁一個重點、字放大、方向鍵切換：問題 → 以終為始 → 看得到的埋點 → 前端提案的代價 → 選品 → 模擬執行 → 資料品質 → 下一步。數字都即時來自模擬器，每頁有連結打開實際畫面。
 
+### M14 設計決定
+
+- **Grainline 的 YAML 仍是作者格式，對外匯出成 Apache Ossie（原 OSI）**：L3 model → dataset（grain → primary_key、欄位型別、時間維度）、lookup → relationship、L4 指標 → metric（ANSI SQL；篩選轉成 CASE WHEN、比率轉成相除）。標準沒有的東西放 `custom_extensions`（`vendor_name: GRAINLINE`）：可加性、grain 合約、欄位追到 L1 的血緣、指標庫說明、相關的 R1–R4 問題；模型層放 L1 埋點合約、R4 業務規則、對帳、L5 劇本。
+- **對官方 JSON Schema 驗證**：`api/app/standards/ossie-schema.json` 是 apache/ossie@`e49a0f0` 的 `core-spec/ossie-schema.json`（`0.2.0.dev0`，**草案**，正式 0.2.0 前可能再變），附來源與 Apache 2.0 授權說明。v1、v2 匯出都通過。
+- **標準表達不了的不匯出，但列出原因**：rollup（先依時間分桶再彙總）、血緣斷掉的指標。
+- **Cube 用 Apache Ossie 官方轉換器**（`apache-ossie-cube`，還沒上 PyPI，依 commit 從 GitHub 壓縮檔安裝）；它是無損的，Ossie 沒有對應位置的放在 Cube 的 `meta.ossie`。Cube 每個 cube 的維度與量值共用名稱空間，所以和指標同名的欄位只在轉 Cube 的副本裡改名（例如 `gross_margin_value`）並說明。轉換器也會誠實提醒：跨資料表的比率（轉換率、點擊率）在 Cube 裡要有 join 路徑——Grainline 是分別在每個期間算分子分母再相除，不需要 join。
+- API：`/export/summary`、`/export/osi.yaml`、`/export/cube.zip`；console「標準匯出」頁。
+
 ## 7. 驗收標準
 
 ### M0
@@ -387,6 +395,14 @@ L1 前端事件 ＋ 業務資料（訂單明細、商品、庫存）
 - [x] demo 商店付款建立後端訂單；過期、未達最低消費、超過每人上限的折扣碼被拒絕並說明原因；前端事件加上後端訂單後對帳乾淨；重啟後、每個版本都看得到；清除 demo 資料時一併清除
 - [x] 埋點透視：v1 的元素都是實線；v2 的商品頁顯示「商品詳情載入沒被記錄」與受影響的指標，加入購物車顯示「點擊就送」的副作用；收藏顯示未宣告會被隔離；點擊時提示會變成哪些指標
 - [x] 會議模式 8 頁都有即時數字，方向鍵切換，連結打開實際畫面
+
+### M14
+
+- [x] v1、v2 的匯出都通過 Apache Ossie 官方 JSON Schema；schema 驗證會抓到缺欄位與不合法的方言
+- [x] dataset 帶 grain 與欄位血緣；lookup 變成 relationship；指標運算式保留篩選與比率；可加性、指標庫說明、相關問題放在延伸欄位
+- [x] rollup 與血緣斷掉的指標沒有匯出，但列出原因
+- [x] 經官方轉換器轉出 Cube 檔案（cubes 加一個 view）；改名與跨表比率的注意事項有列出；OSI 本身不被修改
+- [x] 可以下載 OSI YAML 與 Cube zip；console 有「標準匯出」頁
 
 ### 第二階段之後還沒做的
 

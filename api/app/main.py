@@ -21,6 +21,7 @@ import anthropic
 import duckdb
 import yaml
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, ValidationError
 
 from .assistant import Provider, make_provider, propose_playbook, save_playbook
@@ -31,6 +32,7 @@ from .decisions import build_proposal, evaluate, requirements, run_decision, sav
 from .diff import compare
 from .execution import simulate_execution
 from .shop_backend import LiveBackend, ShopOrder, create_order
+from .standards import OSSIE_COMMIT, OSSIE_VERSION, export_cube, export_osi, to_yaml, validate_osi
 from .story import across_markets, build_story
 from .explain import event_catalog, explain_metric, metric_list, model_catalog
 from .generator import World, simulate
@@ -423,6 +425,74 @@ def create_app(
             except ValidationError as exc:
                 raise HTTPException(422, [str(e["msg"]) for e in exc.errors()]) from exc
         return {"name": body.name}
+
+    # ---------- 語意層標準匯出 ----------
+
+    def _export(plan: int | None) -> tuple[State, dict[str, Any]]:
+        state = workspace.state(plan, include_live=False)
+        key = ("export_osi",)
+        if key not in state.cache:
+            state.cache[key] = export_osi(state.project, state.lineage, state.findings())
+        return state, state.cache[key]
+
+    def _base_cube(state: State) -> str:
+        # Cube 的 view 要從一個 cube 出發：用後端訂單主檔（訂單、營收的真實來源）
+        return "fct_orders" if "fct_orders" in state.project.models else next(iter(state.project.models))
+
+    @app.get("/export/summary")
+    def export_summary(plan: int | None = PlanParam) -> dict[str, Any]:
+        """匯出成 Apache Ossie（OSI）的摘要：是否通過官方 schema、匯出了什麼、沒匯出什麼、轉成 Cube 的說明。"""
+        with workspace.lock:
+            state, doc = _export(plan)
+            errors = validate_osi(doc)
+            try:
+                files, notes = export_cube(doc, _base_cube(state))
+                cube = {"ok": True, "files": sorted(files), "notes": notes, "error": None}
+            except Exception as exc:  # 轉換器拒絕時，誠實顯示原因
+                cube = {"ok": False, "files": [], "notes": [], "error": str(exc)}
+        extension = json.loads(doc["custom_extensions"][0]["data"])
+        return {
+            "tracking_plan_version": state.project.tracking_plan.version,
+            "standard": {"name": "Apache Ossie", "version": OSSIE_VERSION, "commit": OSSIE_COMMIT},
+            "valid": not errors,
+            "errors": errors,
+            "counts": {"datasets": len(doc["datasets"]), "relationships": len(doc["relationships"]),
+                       "metrics": len(doc["metrics"])},
+            "not_exported": extension["not_exported"],
+            "metrics": [
+                {"name": m["name"], "expression": m["expression"]["dialects"][0]["expression"],
+                 "grainline": json.loads(m["custom_extensions"][0]["data"])}
+                for m in doc["metrics"]
+            ],
+            "cube": cube,
+        }
+
+    @app.get("/export/osi.yaml")
+    def export_osi_yaml(plan: int | None = PlanParam) -> Response:
+        with workspace.lock:
+            state, doc = _export(plan)
+        return Response(
+            to_yaml(doc), media_type="application/yaml",
+            headers={"Content-Disposition": f'attachment; filename="grainline_{state.project.name}.ossie.yaml"'},
+        )
+
+    @app.get("/export/cube.zip")
+    def export_cube_zip(plan: int | None = PlanParam) -> Response:
+        import io
+        import zipfile
+
+        with workspace.lock:
+            state, doc = _export(plan)
+            files, notes = export_cube(doc, _base_cube(state))
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path, content in sorted(files.items()):
+                archive.writestr(path, content)
+            archive.writestr("CONVERSION_NOTES.md", "# 轉換說明\n\n" + "".join(f"- {n}\n" for n in notes))
+        return Response(
+            buffer.getvalue(), media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="grainline_{state.project.name}_cube.zip"'},
+        )
 
     @app.get("/events")
     def events(plan: int | None = PlanParam) -> dict[str, Any]:

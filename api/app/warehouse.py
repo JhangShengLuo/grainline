@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
+from pathlib import Path
+
 import duckdb
 
 from . import models
@@ -18,11 +22,15 @@ TABLES = {
 def insert(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> None:
     if not rows:
         return
-    columns = [c.split()[0] for c in TABLES[table].split(", ")]
-    con.executemany(
-        f"insert into {table} values ({', '.join('?' for _ in columns)})",
-        [[row.get(c) for c in columns] for row in rows],
-    )
+    columns = dict(c.split() for c in TABLES[table].split(", "))
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"{table}.ndjson"
+        with path.open("w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps({c: row.get(c) for c in columns}, ensure_ascii=False) + "\n")
+        types = "{" + ", ".join(f"'{c}': '{t}'" for c, t in columns.items()) + "}"
+        con.execute(f"insert into {table} select {', '.join(columns)} "
+                    f"from read_json(?, format = 'newline_delimited', columns = {types})", [str(path)])
 
 
 def build(world: World) -> duckdb.DuckDBPyConnection:

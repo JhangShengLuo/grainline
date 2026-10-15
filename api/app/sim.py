@@ -23,8 +23,8 @@ CAMPAIGNS = {
     "xmas_edm": ("edm", "email"),
 }
 # 第一次進站多半是社群廣告帶來的；之後回訪多半是搜尋廣告和 EDM 帶回來的
-FIRST_VISIT = {"xmas_fb": 0.45, "xmas_line": 0.30, "xmas_gg": 0.15, "xmas_edm": 0.10}
-RETURN_VISIT = {"xmas_fb": 0.15, "xmas_line": 0.10, "xmas_gg": 0.40, "xmas_edm": 0.35}
+FIRST_VISIT = {"xmas_fb": 0.55, "xmas_line": 0.33, "xmas_gg": 0.07, "xmas_edm": 0.05}
+RETURN_VISIT = {"xmas_fb": 0.08, "xmas_line": 0.05, "xmas_gg": 0.45, "xmas_edm": 0.42}
 
 CATALOG = {
     "耳機": (["降噪耳機", "運動耳機", "頭戴耳機", "兒童耳機"], (990, 6990)),
@@ -203,7 +203,7 @@ def simulate(plan: TrackingPlan, config: SimConfig | None = None) -> World:
         starts = sorted(start + timedelta(days=rng.uniform(0, config.days - 0.1)) for _ in range(visits))
         for k, at in enumerate(starts):
             campaign = None
-            if rng.random() < (0.55 if k == 0 else 0.5):
+            if rng.random() < (0.6 if k == 0 else 0.55):
                 campaign = _pick(rng, FIRST_VISIT if k == 0 else RETURN_VISIT)
             shopper.land(f"s{rng.getrandbits(32):08x}", at, campaign)
             if campaign:
@@ -221,7 +221,7 @@ def simulate(plan: TrackingPlan, config: SimConfig | None = None) -> World:
                 if rng.random() < min(0.9, 0.3 * product.conv):
                     shopper.add(product, rng.choices([1, 2], [0.8, 0.2])[0])
             # 回訪越多次越可能買：最後一次進站的活動常常只是「收割」
-            if shopper.cart and rng.random() < min(0.7, 0.25 + 0.15 * k):
+            if shopper.cart and rng.random() < min(0.7, 0.12 + 0.2 * k):
                 order_seq += 1
                 shopper.purchase(f"o{order_seq:05d}")
 

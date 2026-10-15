@@ -229,3 +229,58 @@ def simulate(plan: TrackingPlan, config: SimConfig | None = None) -> World:
     for hit_id, hit in enumerate(hits, start=1):
         hit["hit_id"] = hit_id
     return World(hits=hits, orders=recorder.orders, order_lines=recorder.order_lines, products=products)
+
+
+LIVE_PERSON = "live-you"
+
+
+class LiveShopper:
+    """demo 上「你自己逛」的那位顧客：動作由畫面上的點擊決定，hit 和訂單的寫法和模擬器完全一樣。"""
+
+    def __init__(self, plan: TrackingPlan, config: SimConfig) -> None:
+        self.products = {p.sku: p for p in make_products(config.seed)}
+        self.recorder = Recorder(plan, source="live")
+        start = datetime.combine(config.start, datetime.min.time()) + timedelta(days=config.days - 1, hours=20)
+        self.shopper = Shopper(aid=LIVE_PERSON, uid=None, recorder=self.recorder, rng=random.Random(config.seed), clock=start)
+        self.sessions = 0
+        self.orders = 0
+        self.flushed = (0, 0, 0)  # 已寫進倉儲的 hits、orders、order_lines 數
+
+    def act(self, action: str, campaign: str | None = None, sku: str | None = None) -> None:
+        s = self.shopper
+        if action != "land" and not self.sessions:
+            raise ValueError("先選一個進站來源")
+        if action == "land":
+            if campaign is not None and campaign not in CAMPAIGNS:
+                raise ValueError(f"沒有 {campaign} 這個活動")
+            self.sessions += 1
+            at = s.clock + timedelta(hours=1) if self.sessions > 1 else s.clock
+            s.land(f"slive{self.sessions:02d}", at, campaign)
+            self._browse(campaign)
+        elif action == "list":
+            self._browse(None)
+        elif action in ("product", "add"):
+            if sku not in self.products:
+                raise ValueError(f"沒有 {sku} 這個商品")
+            if action == "product":
+                s.view(self.products[sku])
+            else:
+                s.add(self.products[sku], 1)
+        elif action == "purchase":
+            if not s.cart:
+                raise ValueError("購物車是空的")
+            self.orders += 1
+            s.purchase(f"live-{self.orders:03d}")
+        else:
+            raise ValueError(f"不支援 {action}")
+
+    def _browse(self, campaign: str | None) -> None:
+        ranked = sorted(self.products.values(), key=lambda p: -p.appeal)
+        self.shopper.browse("xmas_picks" if campaign or self.sessions else "home", "/campaign/xmas", ranked[:LIST_SIZE])
+
+    def pending(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """還沒寫進倉儲的新資料。"""
+        h, o, l = self.flushed
+        r = self.recorder
+        self.flushed = (len(r.hits), len(r.orders), len(r.order_lines))
+        return r.hits[h:], r.orders[o:], r.order_lines[l:]

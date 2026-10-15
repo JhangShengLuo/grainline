@@ -10,6 +10,7 @@ from typing import Any
 import duckdb
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
 from . import warehouse
 from .checks import fanout, missing
@@ -17,7 +18,7 @@ from .decision import decision_card
 from .journey import journey, sample_people
 from .models import MODELS
 from .questions import Question, dashboard, load_questions
-from .sim import SimConfig, make_products, simulate
+from .sim import LIVE_PERSON, LiveShopper, SimConfig, make_products, simulate
 from .tracking import TrackingPlan, load_plans
 
 DEFAULT_SPECS = Path(os.environ.get("GRAINLINE_SPECS", Path(__file__).resolve().parents[2] / "specs" / "flow"))
@@ -27,6 +28,13 @@ DEFAULT_SPECS = Path(os.environ.get("GRAINLINE_SPECS", Path(__file__).resolve().
 class State:
     plan: TrackingPlan
     con: duckdb.DuckDBPyConnection
+    live: LiveShopper
+
+
+class Action(BaseModel):
+    action: str
+    campaign: str | None = None
+    sku: str | None = None
 
 
 class Workspace:
@@ -41,7 +49,7 @@ class Workspace:
             raise HTTPException(404, f"沒有 v{version} 這個埋點版本")
         if version not in self.states:
             plan = self.plans[version]
-            self.states[version] = State(plan, warehouse.build(simulate(plan, self.config)))
+            self.states[version] = State(plan, warehouse.build(simulate(plan, self.config)), LiveShopper(plan, self.config))
         return self.states[version]
 
     def question(self, qid: str) -> Question:
@@ -108,6 +116,36 @@ def create_app(spec_dir: Path = DEFAULT_SPECS, config: SimConfig | None = None) 
             return journey(ws.state(plan).con.cursor(), person_id)
         except KeyError:
             raise HTTPException(404, f"找不到 {person_id}") from None
+
+    @app.get("/live")
+    def live(plan: int = 1) -> dict[str, Any] | None:
+        s = ws.state(plan)
+        return journey(s.con.cursor(), LIVE_PERSON) if s.live.sessions else None
+
+    @app.post("/live/actions")
+    def live_action(action: Action, plan: int = 1) -> dict[str, Any]:
+        s = ws.state(plan)
+        try:
+            s.live.act(action.action, action.campaign, action.sku)
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from None
+        hits, orders, lines = s.live.pending()
+        next_id = s.con.execute("select coalesce(max(hit_id), 0) from raw_hits").fetchone()[0]
+        for offset, hit in enumerate(hits, start=1):
+            hit["hit_id"] = next_id + offset
+        warehouse.insert(s.con, "raw_hits", hits)
+        warehouse.insert(s.con, "src_orders", orders)
+        warehouse.insert(s.con, "src_order_lines", lines)
+        return journey(s.con.cursor(), LIVE_PERSON)
+
+    @app.delete("/live")
+    def clear_live() -> dict[str, str]:
+        for version, s in ws.states.items():
+            s.con.execute("delete from raw_hits where source = 'live'")
+            s.con.execute("delete from src_order_lines where order_id like 'live-%'")
+            s.con.execute("delete from src_orders where order_id like 'live-%'")
+            s.live = LiveShopper(s.plan, ws.config)
+        return {"status": "cleared"}
 
     @app.get("/models")
     def models(plan: int = Query(1)) -> list[dict[str, Any]]:

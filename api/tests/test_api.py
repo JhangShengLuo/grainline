@@ -50,3 +50,24 @@ def test_not_found(client, path) -> None:
 
 def test_bad_attribution(client) -> None:
     assert client.get("/questions/budget", params={"attribution": "magic"}).status_code == 422
+
+
+def test_live_journey(client) -> None:
+    client.delete("/live")
+    assert client.get("/live", params={"plan": 2}).json() is None
+    assert client.post("/live/actions", params={"plan": 2}, json={"action": "purchase"}).status_code == 409
+    client.post("/live/actions", params={"plan": 2}, json={"action": "land", "campaign": "xmas_fb"})
+    client.post("/live/actions", params={"plan": 2}, json={"action": "product", "sku": "E01"})
+    client.post("/live/actions", params={"plan": 2}, json={"action": "add", "sku": "E01"})
+    j = client.post("/live/actions", params={"plan": 2}, json={"action": "purchase"}).json()
+    assert [s["ev"] for s in j["steps"]] == ["page_view", "list_view", "page_view", "product_view", "add_to_cart",
+                                             "page_view", "purchase"]
+    assert len(j["orders"]) == 1
+    assert j["orders"][0]["attribution"]["last"][0]["campaign"] == "xmas_fb"
+    # v1 的 purchase 沒帶 order：同樣的操作，訂單接不回來
+    client.post("/live/actions", params={"plan": 1}, json={"action": "land", "campaign": "xmas_fb"})
+    client.post("/live/actions", params={"plan": 1}, json={"action": "add", "sku": "E01"})
+    j1 = client.post("/live/actions", params={"plan": 1}, json={"action": "purchase"}).json()
+    assert j1["orders"] == [] and j1["steps"][-1]["order_linked"] is False
+    client.delete("/live")
+    assert client.get("/live", params={"plan": 2}).json() is None

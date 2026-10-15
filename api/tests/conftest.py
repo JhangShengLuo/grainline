@@ -18,3 +18,12 @@ def plans() -> dict[int, TrackingPlan]:
 @pytest.fixture(scope="session")
 def worlds(plans: dict[int, TrackingPlan]) -> dict[int, World]:
     return {v: simulate(p, SMALL) for v, p in plans.items()}
+
+import duckdb
+
+from app import warehouse
+
+
+@pytest.fixture(scope="session")
+def cons(worlds: dict[int, World]) -> dict[int, duckdb.DuckDBPyConnection]:
+    return {v: warehouse.build(w) for v, w in worlds.items()}

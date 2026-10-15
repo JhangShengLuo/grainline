@@ -1,0 +1,40 @@
+budget:
+  title: 預算分配
+  ask: 哪個活動帶來最多銷售額？明年錢該放哪裡？
+  phrasings:
+    - 我要看各活動帶來的營收
+    - 雙 12 各渠道的成效排名
+    - 哪個廣告最賺錢
+  stance: 要決定錢放哪 → 看最後點擊（誰把人帶來成交），並對照首次點擊，免得砍掉開場的活動
+  grain: 1 張訂單
+  attribution: {default: last, options: [last, first, linear]}
+  fanout: lines_x_touches
+  requires:
+    - {event: page_view, param: utm_campaign, why: 知道這次造訪是哪個活動帶來的}
+    - {event: purchase, param: order, why: 訪客結帳沒有會員編號，要靠訂單編號把訂單接回瀏覽紀錄}
+assists:
+  title: 助攻
+  ask: 哪些活動沒有直接成交，但讓人進站逛、之後才買？
+  phrasings:
+    - FB 廣告看起來沒轉換，要不要砍
+    - 哪些活動有幫忙但沒被算到
+  stance: 要知道誰在幫忙 → 比較線性和最後點擊，差額就是助攻
+  grain: 1 張訂單 × 1 個觸點
+  attribution: {default: linear, options: [linear, last, first]}
+  fanout: touches_x_orders
+  requires:
+    - {event: page_view, param: utm_campaign, why: 知道每次造訪是哪個活動帶來的}
+    - {event: purchase, param: order, why: 訪客結帳沒有會員編號，要靠訂單編號把訂單接回瀏覽紀錄}
+category:
+  title: 品類表現
+  ask: 哪些品類或 SKU 被看很多，但轉換差？
+  phrasings:
+    - 各品類 SKU 從 PV 到訂單數、件數、銷售額
+    - 哪些商品流量大但賣不動
+  stance: 這題不需要歸因 → 每個 SKU 一列，看曝光、瀏覽、加購、下單的漏斗
+  grain: 1 個 SKU
+  fanout: items_x_lines
+  requires:
+    - {event: list_view, param: items, why: 曝光要從列表的商品陣列展開}
+    - {event: product_view, param: sku, why: 知道看的是哪個商品}
+    - {event: add_to_cart, param: sku, why: 知道加購的是哪個商品}

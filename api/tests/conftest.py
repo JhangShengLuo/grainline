@@ -27,3 +27,10 @@ from app import warehouse
 @pytest.fixture(scope="session")
 def cons(worlds: dict[int, World]) -> dict[int, duckdb.DuckDBPyConnection]:
     return {v: warehouse.build(w) for v, w in worlds.items()}
+
+from app.questions import Question, load_questions
+
+
+@pytest.fixture(scope="session")
+def questions() -> dict[str, Question]:
+    return load_questions(SPECS / "questions.yaml")

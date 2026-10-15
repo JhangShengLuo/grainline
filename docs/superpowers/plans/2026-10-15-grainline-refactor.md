@@ -10,6 +10,8 @@
 
 **規格：** `docs/superpowers/specs/2026-10-15-grainline-refactor-design.md`
 
+**進度（2026-10-15）：** Task 1–16 完成；docker 內 pytest 44 passed、Vitest 3 passed；即時操作已透過 docker 驗證（v1 訂單接不回、v2 歸給 xmas_fb）。
+
 **執行方式：** 在 `refactor` 分支上 inline 執行，每個 Task 完成就 commit，每天結束（或每 2–3 個 Task）push。測試在本機用 `uv run --python 3.12`，交付前在 docker 裡再跑一次。
 
 ---

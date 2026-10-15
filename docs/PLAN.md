@@ -1,3 +1,5 @@
+> **2026-10-15：這份計畫已由 refactor 分支的新設計取代**，見 [specs/2026-10-15-grainline-refactor-design.md](superpowers/specs/2026-10-15-grainline-refactor-design.md)。下面是 M0–M14 的歷史紀錄，對應的程式碼在 main 分支。
+
 # Grainline — PLAN
 
 > 從「前端頁面 → 埋點 → 解析 → DW → 報表」的端到端沙盒。埋點設計一改，報表立即重算，並用**假資料上的數字**證明指標之間的 grain / 母體 / 血緣衝突。

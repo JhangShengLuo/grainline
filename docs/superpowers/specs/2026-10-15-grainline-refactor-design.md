@@ -48,10 +48,13 @@
 
 ## 4. 後端設計
 
-### 保留並修改
-- **產生器**（`generator.py`）：hit 改成真實格式，也就是 `ev`、`uid`、`sid`、`ts`、`page`、`utm_source`、`utm_medium`、`utm_campaign`，加上 `items` JSON 陣列。同一位顧客會跨多個 session、從不同活動進站。後端照舊產生 `orders` 和 `order_lines`。預設的 `purchase` hit **不帶** `utm_campaign`，讓缺欄位可以被示範。
-- **編譯器、血緣、檢查**（`compiler.py`、`lineage.py`、`checks.py`）：保留。R1 抓乘開，R3 抓缺欄位，證據要能指回原始 hit 的參數路徑（例如 `items[].sku`）。
-- **L2**：新增 URL 和 JSON 的解析 view，把 query string 和 `items` 展開成欄位或列。
+### 保留的是做法，不是舊程式碼（實作計畫時修正）
+舊的 YAML 編譯器和模擬器跟 L1–L5 規格、折扣碼、庫存、潛力商品真相綁得很緊，要讓它支援 URL 解析、JSON 陣列展開和歸因，花的時間會超過一週。所以保留的是**引擎的做法**：不可變的原始資料、分層 view（schema-on-read）、每張表宣告粒度、用假資料上的數字證明的檢查。核心改用精簡的新模組重寫，舊程式碼留在 main。
+
+- **模擬器**（新的 `sim.py`）：hit 用真實格式 `/collect?ev=…&aid=…&uid=…&sid=…&ts=…&page=…&utm_source=…&utm_medium=…&utm_campaign=…&items=[…]`。同一位顧客會跨多個 session、從不同活動進站；後端產生 `orders` 和 `order_lines`。
+- **埋點規格**（`specs/flow/tracking/v1.yaml`、`v2.yaml`）：每個事件帶哪些參數。v1 的 `purchase` 不帶 `order`（訂單編號），所以訪客結帳（沒有會員 uid）的訂單接不回瀏覽紀錄，無法歸因；v2 補上。模擬器依照規格輸出 hit，所以缺欄位是真的缺。
+- **分層 view**（`models.py`）：每個 view 都宣告層級、粒度和上游，畫面上的粒度標籤和血緣都從這裡來。
+- **檢查**（新的 `checks.py`）：乘開（join 前後的列數和訂單數）、缺欄位（每個事件的參數出現率），證據都指回原始 hit 的參數路徑。
 
 ### 新增
 - **歸因模型**：`fct_touches`（一列 = 一次活動點擊，從 session 第一個 hit 的 utm 取得）、`fct_attributed_orders`（一列 = 訂單 × 活動 × 歸因方式，帶權重）。支援 last、first、linear，回溯期間（lookback）30 天。
@@ -61,7 +64,7 @@
 - **定案 API**：`POST /questions/{id}/decision` 產生決議卡（Markdown）。
 
 ### 移除
-AI 助手、Ossie/Cube 匯出、decisions、execution、story、圖書館（library）、diff 頁，以及它們的 API、測試和前端頁面。舊的 demo 商店改寫成縮圖加可以放大的頁面元件。
+舊的 L1–L5 規格與編譯器、AI 助手、Ossie/Cube 匯出、decisions、execution、story、指標庫、diff、舊 demo 商店與 console，以及它們的 API、測試和前端頁面。新的商店頁面元件改成縮圖加可以放大操作。
 
 ## 5. 驗收標準
 
@@ -69,7 +72,7 @@ AI 助手、Ossie/Cube 匯出、decisions、execution、story、圖書館（libr
 - 選一位樣本顧客，時間軸顯示每一步的頁面縮圖、原始 hit（真實 URL 格式）、中繼表列、儀表板格子；點縮圖可以放大操作，操作後時間軸多一步
 - 預算分配：切換 last、first、linear，同一筆訂單的金額在活動之間移動；三種歸因下，各活動合計都等於總銷售額
 - 開啟「用明細 join」，訂單數乘開並標紅；畫面上能看到 1 張訂單變成 N 列
-- `purchase` 缺 `utm_campaign` 時，畫面上 URL 對應的位置標紅，定案卡寫出「請在 purchase 事件補上 utm_campaign」
+- v1 的 `purchase` 缺 `order` 時，畫面上 URL 對應的位置標紅，儀表板顯示有多少銷售額「無法歸因」，定案卡寫出「請在 purchase 事件補上 order」；切到 v2 後無法歸因變成 0
 - 品類漏斗：SKU 層的曝光 → 瀏覽 → 加購 → 下單，且被看很多但轉換差的 SKU 會被標出
 - 整個 demo 沒有大段說明文字；每個結論都能點到對應的資料列
 - pytest：產生器格式、URL 和 JSON 解析、三種歸因的權重加總為 1、乘開偵測、缺欄位偵測、旅程 API、定案卡；Vitest：時間軸元件

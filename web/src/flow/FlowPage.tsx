@@ -10,6 +10,7 @@ import { ShopPage } from "./ShopPage";
 import { Timeline } from "./Timeline";
 
 const LIVE = "live-you";
+const initial = new URLSearchParams(window.location.search);
 const ZOOMS = [0.5, 0.67, 0.8, 1, 1.25];
 
 export function FlowPage() {
@@ -18,13 +19,13 @@ export function FlowPage() {
   const productList = useApi<Product[]>("/products").data;
   const products = useMemo(() => Object.fromEntries((productList ?? []).map((p) => [p.sku, p])), [productList]);
 
-  const [qid, setQid] = useState("budget");
-  const [plan, setPlan] = useState(1);
-  const [model, setModel] = useState<Model | null>(null);
-  const [fanout, setFanout] = useState(false);
+  const [qid, setQid] = useState(initial.get("q") ?? "budget");
+  const [plan, setPlan] = useState(Number(initial.get("plan") ?? 1));
+  const [model, setModel] = useState<Model | null>((initial.get("attribution") as Model | null) ?? null);
+  const [fanout, setFanout] = useState(initial.get("fanout") === "1");
   const [hover, setHover] = useState<string | null>(null);
-  const [personId, setPersonId] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(3);
+  const [personId, setPersonId] = useState<string | null>(initial.get("person"));
+  const [zoom, setZoom] = useState(Number(initial.get("zoom") ?? 3));
   const [shown, setShown] = useState(Infinity);
   const [playing, setPlaying] = useState(false);
   const [opened, setOpened] = useState<Step | null>(null);
@@ -39,6 +40,15 @@ export function FlowPage() {
   const pid = personId ?? people[0]?.person_id ?? null;
   const journey = useApi<Journey>(pid && pid !== LIVE ? `/journeys/${pid}?plan=${plan}` : null, reload).data;
   const current = pid === LIVE ? live : journey;
+
+  // 狀態寫進網址：會議裡可以直接分享「這個畫面」
+  useEffect(() => {
+    const params = new URLSearchParams({ q: qid, plan: String(plan) });
+    if (model) params.set("attribution", model);
+    if (fanout) params.set("fanout", "1");
+    if (personId) params.set("person", personId);
+    window.history.replaceState(null, "", `?${params}`);
+  }, [qid, plan, model, fanout, personId]);
 
   // 播放：一步一步讓資料流進來
   useEffect(() => {
@@ -153,7 +163,7 @@ export function FlowPage() {
         )}
         <div className="canvas" style={{ zoom: ZOOMS[zoom] }}>
           {current ? (
-            <Timeline journey={current} products={products} question={question} model={attribution}
+            <Timeline journey={current} products={products} missing={r.missing.filter((m) => m.status === "missing")} model={attribution}
               fanout={fanout} hover={hover} shown={shown} onOpen={setOpened} />
           ) : (
             <p className="muted empty">{pid === LIVE ? "還沒有操作，在上面的頁面選一個進站來源開始。" : "載入中…"}</p>

@@ -1,16 +1,22 @@
 import { campaignText, EVENT_TEXT, MODEL_TEXT, money } from "../api";
-import type { Journey, Model, Order, Product, Question, Step, Table } from "../types";
+import type { Journey, Model, Order, Product, Step, Table } from "../types";
 import { HitView, requiredFor } from "./HitView";
 import { RowsView } from "./RowsView";
 import { ShopPage } from "./ShopPage";
 
 const HIT_COLUMNS = ["hit_id", "ev", "uid", "utm_campaign", "sku", "qty", "order_id", "value"];
+const COLUMNS: Record<string, string[]> = {
+  stg_hit_items: ["pos", "sku", "cat", "price"],
+  fct_sessions: ["sid", "person_id", "utm_campaign", "hits"],
+  fct_touches: ["touch_id", "person_id", "campaign"],
+};
 const HIGHLIGHT: Record<string, string> = { list_view: "items", add_to_cart: "add_to_cart", purchase: "purchase", product_view: "product" };
 
-export function Timeline({ journey, products, question, model, fanout, hover, shown, onOpen }: {
+export function Timeline({ journey, products, missing, model, fanout, hover, shown, onOpen }: {
   journey: Journey;
   products: Record<string, Product>;
-  question: Question;
+  /** 這題需要、而且現行埋點完全沒有的參數 */
+  missing: { event: string; param: string }[];
   model: Model | null;
   fanout: boolean;
   hover: string | null;
@@ -50,10 +56,10 @@ export function Timeline({ journey, products, question, model, fanout, hover, sh
                 </div>
               </button>
               <div className="flow-arrow" aria-hidden="true">↓ 送出</div>
-              <HitView step={step} required={requiredFor(step.ev, question.requires)} />
+              <HitView step={step} required={requiredFor(step.ev, missing)} />
               <div className="flow-arrow" aria-hidden="true">↓ 解析</div>
               {step.tables.map((t) => (
-                <RowsView key={t.model} table={t} columns={t.model === "stg_hits" ? HIT_COLUMNS.filter((c) => c in t.rows[0]) : undefined} />
+                <RowsView key={t.model} table={t} columns={t.model === "stg_hits" ? HIT_COLUMNS.filter((c) => c in t.rows[0]) : COLUMNS[t.model]} />
               ))}
               {step.ev === "purchase" && step.order_linked === false && (
                 <div className="unlinked">

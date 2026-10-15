@@ -24,7 +24,9 @@ FANOUTS: dict[str, dict[str, str]] = {
         "totals": """select count(*) as orders, sum(o.total) as revenue
                      from fct_order_lines l join fct_orders o using (order_id)
                      join fct_touches t on t.person_id = o.person_id""",
-        "right_totals": "select count(*) as orders, sum(total) as revenue from fct_orders",
+        "right_totals": """select count(*) as orders, sum(total) as revenue from fct_orders
+                           where order_id in (select o.order_id from fct_orders o
+                                              join fct_touches t on t.person_id = o.person_id)""",
         "example": """select o.order_id as key, count(distinct l.line_no) as lines, count(distinct t.touch_id) as touches,
                              count(*) as rows_after
                       from fct_order_lines l join fct_orders o using (order_id)
@@ -42,9 +44,9 @@ FANOUTS: dict[str, dict[str, str]] = {
                       from fct_orders o join fct_touches t on t.person_id = o.person_id group by t.campaign""",
         "totals": """select count(*) as orders, sum(o.total) as revenue
                      from fct_orders o join fct_touches t on t.person_id = o.person_id""",
-        "right_totals": """select count(distinct o.order_id) as orders, sum(distinct_total) as revenue from (
-                           select distinct o.order_id, o.total as distinct_total from fct_orders o
-                           join fct_touches t on t.person_id = o.person_id) o""",
+        "right_totals": """select count(*) as orders, sum(total) as revenue from fct_orders
+                           where order_id in (select o.order_id from fct_orders o
+                                              join fct_touches t on t.person_id = o.person_id)""",
         "example": """select o.order_id as key, 1 as lines, count(*) as touches, count(*) as rows_after
                       from fct_orders o join fct_touches t on t.person_id = o.person_id
                       group by o.order_id having count(*) >= 2 order by rows_after desc, key limit 1""",

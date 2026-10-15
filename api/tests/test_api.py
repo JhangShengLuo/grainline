@@ -17,6 +17,7 @@ def test_health(client) -> None:
 def test_catalogs(client) -> None:
     assert [p["version"] for p in client.get("/plans").json()] == [1, 2]
     assert [q["id"] for q in client.get("/questions").json()] == ["budget", "assists", "category"]
+    assert len(client.get("/products").json()) == 24
     models = client.get("/models").json()
     assert all(m["grain"] for m in models) and any(m["name"] == "fct_attributed_orders" for m in models)
 

@@ -17,7 +17,7 @@ from .decision import decision_card
 from .journey import journey, sample_people
 from .models import MODELS
 from .questions import Question, dashboard, load_questions
-from .sim import SimConfig, simulate
+from .sim import SimConfig, make_products, simulate
 from .tracking import TrackingPlan, load_plans
 
 DEFAULT_SPECS = Path(os.environ.get("GRAINLINE_SPECS", Path(__file__).resolve().parents[2] / "specs" / "flow"))
@@ -62,6 +62,10 @@ def create_app(spec_dir: Path = DEFAULT_SPECS, config: SimConfig | None = None) 
     @app.get("/plans")
     def plans() -> list[dict[str, Any]]:
         return [p.model_dump() for p in ws.plans.values()]
+
+    @app.get("/products")
+    def products() -> list[dict[str, Any]]:
+        return [{"sku": p.sku, "name": p.name, "cat": p.cat, "price": p.price} for p in make_products(ws.config.seed)]
 
     @app.get("/questions")
     def questions() -> list[dict[str, Any]]:

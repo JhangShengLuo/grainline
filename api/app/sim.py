@@ -57,7 +57,7 @@ class Product:
     conv: float     # 真相：看了商品頁之後加購的傾向
 
     def item(self, pos: int) -> dict[str, Any]:
-        return {"sku": self.sku, "cat": self.cat, "price": self.price, "pos": pos}
+        return {"sku": self.sku, "cat": self.cat, "price": int(self.price), "pos": pos}
 
 
 @dataclass

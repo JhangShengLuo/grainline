@@ -1,673 +1,157 @@
-"""Grainline API：相容性檢查、數字證據、血緣、報表、tracking plan 版本比較，以及 demo 商店的 ingest。
-
-每個 tracking plan 版本各有一個倉儲：同一個 seed 的模擬使用者，加上 demo 商店在那個版本下送出的事件。
-倉儲在第一次用到時才建立（約 1 秒）；規格檔有任何變動，下一個請求會全部重建。
-所有端點都接受 ?plan=<version>，省略時用 status: current 的版本。
-"""
+"""Grainline API：問題、儀表板、檢查、顧客旅程、定案卡。"""
 
 from __future__ import annotations
 
-import json
 import os
-import threading
-from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
-import anthropic
 import duckdb
-import yaml
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import Response
-from pydantic import BaseModel, Field, ValidationError
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
-from .assistant import Provider, make_provider, propose_playbook, save_playbook
-from .catalog import catalog_items
-from .checks import Finding, check_project, effective_additivity, metric_format
-from .compiler import compile_project
-from .decisions import build_proposal, evaluate, requirements, run_decision, save_proposal
-from .diff import compare
-from .execution import simulate_execution
-from .shop_backend import LiveBackend, ShopOrder, create_order
-from .standards import OSSIE_COMMIT, OSSIE_VERSION, export_cube, export_osi, to_yaml, validate_osi
-from .story import across_markets, build_story
-from .explain import event_catalog, explain_metric, metric_list, model_catalog
-from .generator import World, simulate
-from .ingest import IngestBatch, IncomingEvent, LiveStore, plan_warnings
-from .library import coverage, load_library
-from .lineage import Lineage, metric_lineage, resolve
-from .spec import Project, default_plan_version, load_project, read_tracking_plans
-from .warehouse import build_warehouse, load_events, load_source
+from . import warehouse
+from .checks import fanout, missing
+from .decision import decision_card
+from .journey import journey, sample_people
+from .models import MODELS
+from .questions import Question, dashboard, load_questions
+from .sim import LIVE_PERSON, LiveShopper, SimConfig, make_products, simulate
+from .tracking import TrackingPlan, load_plans
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SPECS = REPO_ROOT / "specs" / "shop"
-DEFAULT_DATA = REPO_ROOT / "data"
+DEFAULT_SPECS = Path(os.environ.get("GRAINLINE_SPECS", Path(__file__).resolve().parents[2] / "specs" / "flow"))
 
 
 @dataclass
 class State:
-    project: Project
-    lineage: Lineage
+    plan: TrackingPlan
     con: duckdb.DuckDBPyConnection
-    events: int
-    world: World
-    built_at: datetime = field(default_factory=datetime.now)
-    _findings: list[Finding] | None = None
-    cache: dict[Any, Any] = field(default_factory=dict)
-
-    def findings(self) -> list[Finding]:
-        """有新的 live 事件時證據要重算，所以延遲到需要時才計算。"""
-        if self._findings is None:
-            self._findings = check_project(self.project, self.lineage, self.con)
-        return self._findings
+    live: LiveShopper
 
 
-def _spec_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, ValidationError):
-        errors = [str(e["msg"]) for e in exc.errors()]
-    else:
-        errors = [str(exc)]
-    return HTTPException(422, {"message": "規格驗證失敗", "errors": errors})
+class Action(BaseModel):
+    action: str
+    campaign: str | None = None
+    sku: str | None = None
 
 
 class Workspace:
-    """所有呼叫端都必須持有 self.lock。"""
+    def __init__(self, spec_dir: Path, config: SimConfig) -> None:
+        self.plans = load_plans(spec_dir / "tracking")
+        self.questions = load_questions(spec_dir / "questions.yaml")
+        self.config = config
+        self.states: dict[int, State] = {}
 
-    def __init__(self, spec_dir: Path, data_dir: Path) -> None:
-        self.spec_dir = spec_dir
-        self.live = LiveStore(data_dir / f"live_events_{spec_dir.name}.ndjson")
-        self.backend = LiveBackend(data_dir / f"live_backend_{spec_dir.name}.ndjson")
-        self.lock = threading.Lock()
-        self._fingerprint: tuple[Any, ...] | None = None
-        # (版本, 是否包含 demo 商店的事件) → 倉儲
-        self._states: dict[tuple[int, bool], State] = {}
+    def state(self, version: int) -> State:
+        if version not in self.plans:
+            raise HTTPException(404, f"沒有 v{version} 這個埋點版本")
+        if version not in self.states:
+            plan = self.plans[version]
+            self.states[version] = State(plan, warehouse.build(simulate(plan, self.config)), LiveShopper(plan, self.config))
+        return self.states[version]
 
-    def _refresh(self) -> None:
-        fingerprint = tuple(
-            (str(p.relative_to(self.spec_dir)), p.stat().st_mtime_ns, p.stat().st_size)
-            for p in sorted(self.spec_dir.rglob("*.yaml"))
-        )
-        if fingerprint != self._fingerprint:
-            for state in self._states.values():
-                state.con.close()
-            self._states = {}
-            self._fingerprint = fingerprint
-
-    def plans(self) -> dict[int, dict[str, Any]]:
-        self._refresh()
-        try:
-            return read_tracking_plans(self.spec_dir)
-        except (ValueError, yaml.YAMLError) as exc:
-            raise _spec_error(exc) from exc
-
-    def resolve_version(self, version: int | None) -> int:
-        plans = self.plans()
-        if version is None:
-            return default_plan_version(plans)
-        if version not in plans:
-            raise HTTPException(404, f"沒有 tracking plan v{version}（有：{', '.join(f'v{v}' for v in plans)}）")
-        return version
-
-    def state(self, version: int | None = None, include_live: bool = True) -> State:
-        """include_live=False：只有模擬資料，版本比較用（兩個版本是同一群人、同樣的行為）。"""
-        version = self.resolve_version(version)
-        key = (version, include_live)
-        if key not in self._states:
-            try:
-                project = load_project(self.spec_dir, version)
-            except (ValidationError, ValueError, yaml.YAMLError) as exc:
-                raise _spec_error(exc) from exc
-            lineage = resolve(project)
-            con = duckdb.connect(":memory:")
-            world = simulate(project)
-            build_warehouse(con, project, world, lineage)
-            if include_live:
-                live = [e for e in self.live.read_all() if e["tracking_plan_version"] == version]
-                load_events(con, live, source="live")
-                append_backend(con, project, self.backend.read_all())
-            self._states[key] = State(project, lineage, con, len(world.events), world)
-        return self._states[key]
-
-    def built(self, version: int) -> State | None:
-        return self._states.get((version, True))
-
-    def built_states(self) -> list[tuple[tuple[int, bool], State]]:
-        return list(self._states.items())
+    def question(self, qid: str) -> Question:
+        if qid not in self.questions:
+            raise HTTPException(404, f"沒有 {qid} 這個問題")
+        return self.questions[qid]
 
 
-def _rows(con: duckdb.DuckDBPyConnection, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
-    cursor = con.execute(sql, params or [])
-    names = [d[0] for d in cursor.description]
-    return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
-
-
-def append_backend(con: duckdb.DuckDBPyConnection, project: Project, rows: dict[str, list[dict[str, Any]]]) -> None:
-    """demo 商店建立的後端資料附加到倉儲（後端資料和 tracking plan 無關，每個版本都一樣）。"""
-    for table, items in rows.items():
-        if items and table in project.sources:
-            load_source(con, table, project.sources[table], items, replace=False)
-
-
-def _now_taipei() -> datetime:
-    return datetime.now(ZoneInfo("Asia/Taipei")).replace(tzinfo=None, microsecond=0)
-
-
-def _exists(con: duckdb.DuckDBPyConnection, event_id: str) -> bool:
-    return con.execute("select count(*) from raw_events where event_id = ?", [event_id]).fetchone()[0] > 0
-
-
-class PlaybookRequest(BaseModel):
-    request: str = Field(min_length=4, max_length=500)
-    plan: int | None = None
-
-
-class SavePlaybook(BaseModel):
-    name: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
-    decision: dict[str, Any]
-
-
-def create_app(
-    spec_dir: Path | None = None,
-    data_dir: Path | None = None,
-    llm: Provider | None = None,
-    clock: Any = None,
-) -> FastAPI:
-    now = clock or _now_taipei
-    workspace = Workspace(
-        spec_dir or Path(os.environ.get("GRAINLINE_SPECS", DEFAULT_SPECS)),
-        data_dir or Path(os.environ.get("GRAINLINE_DATA", DEFAULT_DATA)),
-    )
-    app = FastAPI(title="Grainline API")
-    PlanParam = Query(None, description="tracking plan 版本；省略時用 status: current 的版本")
+def create_app(spec_dir: Path = DEFAULT_SPECS, config: SimConfig | None = None) -> FastAPI:
+    app = FastAPI(title="Grainline")
+    ws = Workspace(spec_dir, config or SimConfig())
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        with duckdb.connect(":memory:") as con:
-            con.execute("select 1").fetchone()
+        duckdb.connect(":memory:").execute("select 1").fetchone()
         return {"status": "ok", "duckdb": "ok"}
 
-    # ---------- tracking plan ----------
+    @app.get("/plans")
+    def plans() -> list[dict[str, Any]]:
+        return [p.model_dump() for p in ws.plans.values()]
 
-    @app.get("/tracking-plans")
-    def tracking_plans() -> list[dict[str, Any]]:
-        with workspace.lock:
-            plans = workspace.plans()
-            default = default_plan_version(plans)
-        return [
-            {
-                "version": v,
-                "name": raw.get("name", ""),
-                "status": raw.get("status", "proposal"),
-                "description": raw.get("description", ""),
-                "default": v == default,
-            }
-            for v, raw in plans.items()
-        ]
+    @app.get("/products")
+    def products() -> list[dict[str, Any]]:
+        return [{"sku": p.sku, "name": p.name, "cat": p.cat, "price": p.price} for p in make_products(ws.config.seed)]
 
-    @app.get("/tracking-plan")
-    def tracking_plan(plan: int | None = PlanParam) -> dict[str, Any]:
-        with workspace.lock:
-            state = workspace.state(plan)
-        return state.project.tracking_plan.model_dump(exclude_none=True, by_alias=True)
+    @app.get("/questions")
+    def questions() -> list[dict[str, Any]]:
+        return [q.model_dump() for q in ws.questions.values()]
 
-    @app.get("/diff")
-    def diff(base: int | None = Query(None), target: int | None = Query(None)) -> dict[str, Any]:
-        """預設比較 current 版本與最新的另一個版本。只用模擬資料：同一群人、同樣的行為，差異全部來自埋點設計。"""
-        with workspace.lock:
-            plans = workspace.plans()
-            base_v = workspace.resolve_version(base)
-            if target is None:
-                others = [v for v in plans if v != base_v]
-                if not others:
-                    raise HTTPException(404, "只有一個 tracking plan 版本，沒有東西可以比較")
-                target = max(others)
-            target_v = workspace.resolve_version(target)
-            return compare(workspace.state(base_v, include_live=False), workspace.state(target_v, include_live=False))
+    def _attribution(q: Question, attribution: str | None) -> str | None:
+        if not q.attribution:
+            return None
+        if attribution and attribution not in q.attribution.options:
+            raise HTTPException(422, f"{q.title} 不支援 {attribution} 歸因")
+        return attribution or q.attribution.default
 
-    # ---------- 檢查、指標、報表 ----------
-
-    @app.get("/checks")
-    def checks(rule: str | None = Query(None, pattern="^R[1-4]$"), plan: int | None = PlanParam) -> dict[str, Any]:
-        with workspace.lock:
-            state = workspace.state(plan)
-            findings = [f.to_dict() for f in state.findings() if rule is None or f.rule == rule]
+    @app.get("/questions/{qid}")
+    def question(qid: str, plan: int = 1, attribution: str | None = None) -> dict[str, Any]:
+        q, s = ws.question(qid), ws.state(plan)
+        model = _attribution(q, attribution)
+        cur = s.con.cursor()
         return {
-            "project": state.project.name,
-            "tracking_plan_version": state.project.tracking_plan.version,
-            "built_at": state.built_at.isoformat(timespec="seconds"),
-            "generated_events": state.events,
-            "summary": {
-                "error": sum(f["severity"] == "error" for f in findings),
-                "warning": sum(f["severity"] == "warning" for f in findings),
-            },
-            "findings": findings,
+            "question": q.model_dump(),
+            "plan": plan,
+            "attribution": model,
+            "dashboard": dashboard(cur, q, model),
+            "fanout": fanout(cur, q),
+            "missing": missing(cur, s.plan, q),
         }
 
-    @app.get("/metrics")
-    def metrics(plan: int | None = PlanParam) -> list[dict[str, Any]]:
-        with workspace.lock:
-            state = workspace.state(plan)
-            guide = {m["name"]: m for m in metric_list(state.project, state.lineage, state.findings())}
-        project = state.project
-        return [
-            {
-                **guide[name],
-                "description": metric.description,
-                "declared_additivity": getattr(metric, "additivity", None),
-                "additivity": effective_additivity(project, name),
-                "format": metric_format(project, name),
-            }
-            for name, metric in project.metric_layer.metrics.items()
-        ]
+    @app.get("/questions/{qid}/decision", response_class=PlainTextResponse)
+    def decision(qid: str, plan: int = 1, attribution: str | None = None) -> str:
+        q, s = ws.question(qid), ws.state(plan)
+        cur = s.con.cursor()
+        return decision_card(q, s.plan, _attribution(q, attribution), fanout(cur, q), missing(cur, s.plan, q))
 
-    @app.get("/metrics/{name}/explain")
-    def explain(name: str, plan: int | None = PlanParam, example: int = Query(0, ge=0)) -> dict[str, Any]:
-        """給業務看的白話說明：步驟、注意事項，以及一個模擬使用者的例子。"""
-        with workspace.lock:
-            state = workspace.state(plan)
-            if name not in state.project.metric_layer.metrics:
-                raise HTTPException(404, f"沒有指標 {name}")
-            return explain_metric(state.project, state.lineage, state.findings(), state.con, name, example)
+    @app.get("/journeys")
+    def journeys(plan: int = 1) -> list[dict[str, Any]]:
+        return sample_people(ws.state(plan).con.cursor())
 
-    @app.get("/library")
-    def library(plan: int | None = PlanParam) -> dict[str, Any]:
-        """內建的行銷指標庫，以及每個指標在這個 tracking plan 下能不能算、還缺什麼、找誰。"""
-        with workspace.lock:
-            state = workspace.state(plan)
-        lib = load_library()
-        items = coverage(state.project, state.lineage, lib)
-        return {
-            "tracking_plan_version": state.project.tracking_plan.version,
-            "groups": lib.groups,
-            "summary": {status: sum(i["status"] == status for i in items)
-                        for status in ("available", "differs", "buildable", "blocked")},
-            "metrics": items,
-        }
-
-    # ---------- L5 決策 ----------
-
-    def _decision_state(name: str, plan: int | None, include_live: bool = True) -> State:
-        state = workspace.state(plan, include_live)
-        if name not in state.project.decisions:
-            raise HTTPException(404, f"沒有決策劇本 {name}")
-        return state
-
-    @app.get("/decisions")
-    def decisions(plan: int | None = PlanParam) -> list[dict[str, Any]]:
-        with workspace.lock:
-            state = workspace.state(plan)
-            return [
-                {"name": name, "label": d.label, "question": d.question,
-                 "ready": requirements(state.project, state.lineage, name)["ready"]}
-                for name, d in state.project.decisions.items()
-            ]
-
-    @app.get("/decisions/{name}")
-    def decision(name: str, plan: int | None = PlanParam,
-                 as_of_day: int | None = Query(None, ge=1, description="只用前 N 天的資料")) -> dict[str, Any]:
-        """執行劇本：建議清單、每個候選的分數與規則檢查，以及反推出的需求。"""
-        with workspace.lock:
-            state = _decision_state(name, plan)
-            sim = state.project.simulation
-            as_of = sim.start_date + timedelta(days=as_of_day) if as_of_day else None
-            return run_decision(state.project, state.lineage, state.con, name, as_of)
-
-    @app.get("/decisions/{name}/evaluation")
-    def decision_evaluation(name: str, plan: int | None = PlanParam) -> dict[str, Any]:
-        """用模擬器的真相評估：劇本與傳統選法的命中率、第幾天開始選得準。只用模擬資料。"""
-        with workspace.lock:
-            state = _decision_state(name, plan, include_live=False)
-            return evaluate(state.project, state.lineage, state.con, name, state.world.truth)
-
-    @app.get("/decisions/{name}/execution")
-    def decision_execution(
-        name: str,
-        plan: int | None = PlanParam,
-        slots: int = Query(5, ge=1, le=8, description="換掉首頁精選的後幾格"),
-        horizon_days: int = Query(14, ge=7, le=28),
-        replicates: int = Query(5, ge=2, le=10),
-    ) -> dict[str, Any]:
-        """模擬執行：照建議清單換首頁精選，接下來幾天的效果（含範圍、對照組、白話說明）。只用模擬資料。"""
-        with workspace.lock:
-            state = _decision_state(name, plan, include_live=False)
-            key = ("execution", name, slots, horizon_days, replicates)
-            if key not in state.cache:
-                state.cache[key] = simulate_execution(
-                    state.project, state.lineage, state.con, name, slots, horizon_days, replicates
-                )
-            return state.cache[key]
-
-    @app.get("/story")
-    def story(base: int | None = Query(None), proposal: int = Query(2)) -> dict[str, Any]:
-        """傳統做法 vs Grainline：時間軸是示意，數字由模擬器實際算出。只用模擬資料。"""
-        with workspace.lock:
-            current = workspace.state(base, include_live=False)
-            other = workspace.state(proposal, include_live=False)
-            key = ("story", other.project.tracking_plan.version)
-            if key not in current.cache:
-                current.cache[key] = build_story(current, other)
-            return current.cache[key]
-
-    @app.get("/story/markets")
-    def story_markets(base: int | None = Query(None)) -> dict[str, Any]:
-        """在 6 個不同的模擬市場重複比較劇本與傳統做法（約 30 秒，結果會快取）。"""
-        with workspace.lock:
-            current = workspace.state(base, include_live=False)
-            key = ("story_markets",)
-            if key not in current.cache:
-                current.cache[key] = across_markets(current.project)
-            return current.cache[key]
-
-    @app.get("/decisions/{name}/proposal")
-    def decision_proposal(name: str, plan: int | None = PlanParam) -> dict[str, Any]:
-        """預覽：讓這個劇本可以執行，tracking plan 要補什麼（還不會寫入）。"""
-        with workspace.lock:
-            state = _decision_state(name, plan)
-            return build_proposal(workspace.spec_dir, state.project, state.lineage, name)
-
-    @app.post("/decisions/{name}/proposal")
-    def create_decision_proposal(name: str, plan: int | None = PlanParam) -> dict[str, Any]:
-        """把提案寫成新的 tracking plan 版本檔案（status: proposal）；寫入後倉儲會自動重建。"""
-        with workspace.lock:
-            state = _decision_state(name, plan)
-            proposal = build_proposal(workspace.spec_dir, state.project, state.lineage, name)
-            if not proposal["needed"]:
-                raise HTTPException(409, "這個 tracking plan 已經能執行這個劇本，不需要提案")
-            path = save_proposal(workspace.spec_dir, proposal)
-        return {"version": proposal["version"], "filename": proposal["filename"], "path": str(path),
-                "changes": proposal["changes"]}
-
-    # ---------- AI 提案 ----------
-
-    def provider() -> Provider | None:
-        return llm if llm is not None else make_provider()
-
-    @app.get("/assistant/status")
-    def assistant_status() -> dict[str, Any]:
-        current = provider()
-        return {
-            "available": current is not None,
-            "provider": current.name if current else None,
-            "model": current.model if current else None,
-            "reason": None if current else "沒有設定 OPENROUTER_API_KEY 或 ANTHROPIC_API_KEY：在 .env 加上其中一個後重新啟動 api。",
-        }
-
-    @app.post("/assistant/playbooks")
-    def assistant_playbook(body: PlaybookRequest) -> dict[str, Any]:
-        """自然語言 → L5 劇本：Claude 提案，規則引擎驗證，不通過就讓它修正（還不會寫入）。"""
-        current = provider()
-        if current is None:
-            raise HTTPException(503, "沒有設定 OPENROUTER_API_KEY 或 ANTHROPIC_API_KEY")
-        with workspace.lock:
-            state = workspace.state(body.plan, include_live=False)
-            cursor = state.con.cursor()  # 呼叫 Claude 要等一陣子，不要鎖住其他請求
-            project = state.project
+    @app.get("/journeys/{person_id}")
+    def person(person_id: str, plan: int = 1) -> dict[str, Any]:
         try:
-            return propose_playbook(current, project, cursor, body.request)
-        except anthropic.APIStatusError as exc:
-            raise HTTPException(502, f"Claude API 錯誤（{exc.status_code}）：{exc.message}") from exc
-        except anthropic.APIConnectionError as exc:
-            raise HTTPException(502, "連不到 Claude API") from exc
-        finally:
-            cursor.close()
+            return journey(ws.state(plan).con.cursor(), person_id)
+        except KeyError:
+            raise HTTPException(404, f"找不到 {person_id}") from None
 
-    @app.post("/assistant/playbooks/save")
-    def save_assistant_playbook(body: SavePlaybook) -> dict[str, Any]:
-        with workspace.lock:
-            state = workspace.state()
-            try:
-                save_playbook(workspace.spec_dir / "l5_decisions.yaml", body.name, body.decision, state.project)
-            except FileExistsError as exc:
-                raise HTTPException(409, str(exc)) from exc
-            except ValidationError as exc:
-                raise HTTPException(422, [str(e["msg"]) for e in exc.errors()]) from exc
-        return {"name": body.name}
+    @app.get("/live")
+    def live(plan: int = 1) -> dict[str, Any] | None:
+        s = ws.state(plan)
+        return journey(s.con.cursor(), LIVE_PERSON) if s.live.sessions else None
 
-    # ---------- 語意層標準匯出 ----------
+    @app.post("/live/actions")
+    def live_action(action: Action, plan: int = 1) -> dict[str, Any]:
+        s = ws.state(plan)
+        try:
+            s.live.act(action.action, action.campaign, action.sku)
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from None
+        hits, orders, lines = s.live.pending()
+        next_id = s.con.execute("select coalesce(max(hit_id), 0) from raw_hits").fetchone()[0]
+        for offset, hit in enumerate(hits, start=1):
+            hit["hit_id"] = next_id + offset
+        warehouse.insert(s.con, "raw_hits", hits)
+        warehouse.insert(s.con, "src_orders", orders)
+        warehouse.insert(s.con, "src_order_lines", lines)
+        return journey(s.con.cursor(), LIVE_PERSON)
 
-    def _export(plan: int | None) -> tuple[State, dict[str, Any]]:
-        state = workspace.state(plan, include_live=False)
-        key = ("export_osi",)
-        if key not in state.cache:
-            state.cache[key] = export_osi(state.project, state.lineage, state.findings())
-        return state, state.cache[key]
-
-    def _base_cube(state: State) -> str:
-        # Cube 的 view 要從一個 cube 出發：用後端訂單主檔（訂單、營收的真實來源）
-        return "fct_orders" if "fct_orders" in state.project.models else next(iter(state.project.models))
-
-    @app.get("/export/summary")
-    def export_summary(plan: int | None = PlanParam) -> dict[str, Any]:
-        """匯出成 Apache Ossie（OSI）的摘要：是否通過官方 schema、匯出了什麼、沒匯出什麼、轉成 Cube 的說明。"""
-        with workspace.lock:
-            state, doc = _export(plan)
-            errors = validate_osi(doc)
-            try:
-                files, notes = export_cube(doc, _base_cube(state))
-                cube = {"ok": True, "files": sorted(files), "notes": notes, "error": None}
-            except Exception as exc:  # 轉換器拒絕時，誠實顯示原因
-                cube = {"ok": False, "files": [], "notes": [], "error": str(exc)}
-        extension = json.loads(doc["custom_extensions"][0]["data"])
-        return {
-            "tracking_plan_version": state.project.tracking_plan.version,
-            "standard": {"name": "Apache Ossie", "version": OSSIE_VERSION, "commit": OSSIE_COMMIT},
-            "valid": not errors,
-            "errors": errors,
-            "counts": {"datasets": len(doc["datasets"]), "relationships": len(doc["relationships"]),
-                       "metrics": len(doc["metrics"])},
-            "not_exported": extension["not_exported"],
-            "metrics": [
-                {"name": m["name"], "expression": m["expression"]["dialects"][0]["expression"],
-                 "grainline": json.loads(m["custom_extensions"][0]["data"])}
-                for m in doc["metrics"]
-            ],
-            "cube": cube,
-        }
-
-    @app.get("/export/osi.yaml")
-    def export_osi_yaml(plan: int | None = PlanParam) -> Response:
-        with workspace.lock:
-            state, doc = _export(plan)
-        return Response(
-            to_yaml(doc), media_type="application/yaml",
-            headers={"Content-Disposition": f'attachment; filename="grainline_{state.project.name}.ossie.yaml"'},
-        )
-
-    @app.get("/export/cube.zip")
-    def export_cube_zip(plan: int | None = PlanParam) -> Response:
-        import io
-        import zipfile
-
-        with workspace.lock:
-            state, doc = _export(plan)
-            files, notes = export_cube(doc, _base_cube(state))
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            for path, content in sorted(files.items()):
-                archive.writestr(path, content)
-            archive.writestr("CONVERSION_NOTES.md", "# 轉換說明\n\n" + "".join(f"- {n}\n" for n in notes))
-        return Response(
-            buffer.getvalue(), media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="grainline_{state.project.name}_cube.zip"'},
-        )
-
-    @app.get("/events")
-    def events(plan: int | None = PlanParam) -> dict[str, Any]:
-        """給前端／PM 的埋點清單。"""
-        with workspace.lock:
-            state = workspace.state(plan)
-            return event_catalog(state.project, state.lineage, state.con)
+    @app.delete("/live")
+    def clear_live() -> dict[str, str]:
+        for version, s in ws.states.items():
+            s.con.execute("delete from raw_hits where source = 'live'")
+            s.con.execute("delete from src_order_lines where order_id like 'live-%'")
+            s.con.execute("delete from src_orders where order_id like 'live-%'")
+            s.live = LiveShopper(s.plan, ws.config)
+        return {"status": "cleared"}
 
     @app.get("/models")
-    def models(plan: int | None = PlanParam) -> dict[str, Any]:
-        """給 DE 的資料模型。"""
-        with workspace.lock:
-            state = workspace.state(plan)
-            views = compile_project(state.project, state.lineage)
-            return model_catalog(state.project, state.lineage, state.findings(), views, state.con)
-
-    @app.get("/metrics/{name}/lineage")
-    def lineage(name: str, plan: int | None = PlanParam) -> dict[str, Any]:
-        with workspace.lock:
-            state = workspace.state(plan)
-        if name not in state.project.metric_layer.metrics:
-            raise HTTPException(404, f"沒有指標 {name}")
-        return metric_lineage(state.project, state.lineage, name)
-
-    @app.get("/reports")
-    def reports(plan: int | None = PlanParam) -> list[dict[str, Any]]:
-        with workspace.lock:
-            state = workspace.state(plan)
-        return [
-            {
-                "name": name,
-                "label": report.label,
-                "time_grain": report.time_grain,
-                "dimensions": report.dimensions,
-                "metrics": report.metrics,
-                "broken": state.lineage.broken_reports.get(name),
-            }
-            for name, report in state.project.metric_layer.reports.items()
-        ]
-
-    @app.get("/reports/{name}")
-    def report(name: str, plan: int | None = PlanParam) -> dict[str, Any]:
-        with workspace.lock:
-            state = workspace.state(plan)
-            spec = state.project.metric_layer.reports.get(name)
-            if spec is None:
-                raise HTTPException(404, f"沒有報表 {name}")
-            if name in state.lineage.broken_reports:
-                raise HTTPException(409, {"message": "報表血緣斷掉，無法建立", "reason": state.lineage.broken_reports[name]})
-            rows = _rows(state.con, f"select * from rpt_{name}")
-            live_periods = [
-                r["period"] for r in _rows(state.con, f"""
-select distinct cast(date_trunc('{spec.time_grain}', timestamp) as date) as period
-from raw_events where source = 'live' order by 1""")
-            ]
-        metrics = state.project.metric_layer.metrics
-        return {
-            "name": name,
-            "label": spec.label,
-            "tracking_plan_version": state.project.tracking_plan.version,
-            "time_grain": spec.time_grain,
-            "dimensions": spec.dimensions,
-            "metrics": [
-                {
-                    "name": m,
-                    "label": metrics[m].label,
-                    "additivity": effective_additivity(state.project, m),
-                    "format": metric_format(state.project, m),
-                }
-                for m in spec.metrics
-            ],
-            "live_periods": live_periods,
-            "rows": rows,
-        }
-
-    # ---------- demo 商店 ----------
-
-    @app.get("/catalog")
-    def catalog() -> list[dict[str, Any]]:
-        with workspace.lock:
-            state = workspace.state()
-        return catalog_items(state.project)
-
-    @app.post("/ingest")
-    def ingest(batch: IngestBatch) -> dict[str, Any]:
-        raw = [e.to_raw() for e in batch.events]
-        fresh = workspace.live.append_new(raw)
-        fresh_ids = {e["event_id"] for e in fresh}
-        warnings: list[dict[str, Any]] = []
-        by_version: dict[int, list[IncomingEvent]] = defaultdict(list)
-        for event in batch.events:
-            if event.event_id in fresh_ids:
-                by_version[event.tracking_plan_version].append(event)
-        with workspace.lock:
-            try:
-                plans = workspace.plans()
-            except HTTPException:
-                # 規格暫時是壞的：事件已經保存，規格修好、倉儲重建時會一起載入
-                return {"accepted": len(fresh), "duplicates": len(raw) - len(fresh), "warnings": [],
-                        "note": "規格目前驗證失敗，事件已保存，規格修好後會出現在報表"}
-            for version, events in by_version.items():
-                if version not in plans:
-                    warnings += [
-                        {"event_id": e.event_id, "event_name": e.event_name,
-                         "messages": [f"tracking plan v{version} 不存在：事件已保存，但不會出現在任何報表"]}
-                        for e in events
-                    ]
-                    continue
-                state = workspace.state(version)
-                # 剛建立的倉儲已經從檔案載入過，不要再插一次
-                new_rows = [e.to_raw() for e in events if not _exists(state.con, e.event_id)]
-                if new_rows:
-                    load_events(state.con, new_rows, source="live")
-                    state._findings = None
-                plan = state.project.tracking_plan
-                warnings += [
-                    {"event_id": e.event_id, "event_name": e.event_name, "messages": messages}
-                    for e in events
-                    if (messages := plan_warnings(plan, e))
-                ]
-        return {"accepted": len(fresh), "duplicates": len(raw) - len(fresh), "warnings": warnings}
-
-    @app.post("/shop/orders")
-    def shop_order(order: ShopOrder) -> dict[str, Any]:
-        """demo 商店付款：後端建立訂單（計價、驗證折扣碼、算運費）。訂單以這裡為準，前端事件只是回報。"""
-        with workspace.lock:
-            state = workspace.state()
-            try:
-                summary, rows = create_order(state.project, state.con, order, now())
-            except ValueError as exc:
-                raise HTTPException(422, str(exc)) from exc
-            workspace.backend.append(rows)
-            # 已經建立的倉儲（每個版本、含 demo 資料的那份）直接附加，不用重建
-            for (version, include_live), built in workspace.built_states():
-                if include_live:
-                    append_backend(built.con, built.project, rows)
-                    built._findings = None
-                    built.cache.clear()
-        return summary
-
-    @app.get("/events/live")
-    def live_events(limit: int = Query(50, ge=1, le=500), plan: int | None = PlanParam) -> list[dict[str, Any]]:
-        """demo 商店在這個版本下送來的事件，以及 L2 怎麼解析它們（person、session、是否被隔離）。"""
-        with workspace.lock:
-            state = workspace.state(plan)
-            rows = _rows(state.con, f"""
-select r.event_id, r.event_name, r.timestamp, r.anonymous_id, r.user_id,
-    s.person_id, s.session_id, s.event_id is null as quarantined,
-    json(r.properties) as properties
-from raw_events r left join stg_events s using (event_id)
-where r.source = 'live'
-order by r.timestamp desc, r.event_id
-limit {limit}""")
-        for row in rows:
-            row["properties"] = json.loads(row["properties"])
-        return rows
-
-    @app.delete("/events/live")
-    def clear_live_events() -> dict[str, int]:
-        """刪除 demo 商店送出的所有事件（所有版本）；模擬資料不受影響。"""
-        with workspace.lock:
-            deleted = len(workspace.live.read_all())
-            workspace.live.clear()
-            workspace.backend.clear()
-            for (_, include_live), built in workspace.built_states():
-                if include_live:
-                    for table in ("orders", "order_lines", "coupon_redemptions"):
-                        if table in built.project.sources:
-                            key = {"orders": "order_id", "order_lines": "order_id", "coupon_redemptions": "redemption_id"}[table]
-                            built.con.execute(f"delete from src_{table} where {key} like '%-live-%'")
-            for version in list(workspace.plans()):
-                if state := workspace.built(version):
-                    state.con.execute("delete from raw_events where source = 'live'")
-                    state._findings = None
-        return {"deleted": deleted}
+    def models(plan: int = Query(1)) -> list[dict[str, Any]]:
+        cur = ws.state(plan).con.cursor()
+        return [{"name": m.name, "layer": m.layer, "title": m.title, "grain": m.grain, "upstream": list(m.upstream),
+                 "rows": cur.execute(f"select count(*) from {m.name}").fetchone()[0]} for m in MODELS]
 
     return app
 

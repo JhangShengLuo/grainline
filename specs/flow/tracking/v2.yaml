@@ -1,0 +1,18 @@
+version: 2
+name: 提案：purchase 帶訂單編號
+events:
+  page_view:
+    params: [page, utm_source, utm_medium, utm_campaign]
+    when: 每次頁面載入；utm 只在從廣告進站的第一頁
+  list_view:
+    params: [page, list, items]
+    when: 商品列表顯示；items 是這次看到的商品陣列
+  product_view:
+    params: [page, sku, cat, price]
+    when: 商品頁載入
+  add_to_cart:
+    params: [sku, qty, price]
+    when: 加入購物車成功
+  purchase:
+    params: [order, value]
+    when: 付款完成頁
